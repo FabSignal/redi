@@ -11,10 +11,12 @@ Production-oriented monorepo with a modular, scalable architecture. It contains 
 - Turborepo (task orchestration and caching)
 - TypeScript
 - Next.js (App Router)
+- React (via Next.js)
+- Tailwind CSS
 - Husky + lint-staged (Git hooks)
 - Supabase (Database/Auth)
 - Stellar + Soroban (smart contracts and clients)
-- OpenTelemetry (observability, optional)
+- Observability package scaffold (future OpenTelemetry integration)
 
 ## Requirements
 
