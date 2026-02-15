@@ -24,29 +24,51 @@ pub enum PlanStatus {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstallmentStatus {
     Pending,  // Cuota pendiente de pago
     Paid,     // Cuota pagada exitosamente
     Failed,   // Cuota falló por falta de fondos
 }
 
+// ============================================================
+// NOTA TÉCNICA: Implementación de PaymentSource
+// ============================================================
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum PaymentSource {
-    Available,  // Pagado desde shares disponibles
-    Protected,  // Pagado desde shares protegidos (fallback)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaymentSource(pub u32);
+
+impl PaymentSource {
+    pub fn available() -> Self {
+        Self(0)
+    }
+    
+    pub fn protected() -> Self {
+        Self(1)
+    }
+    
+    pub fn is_available(&self) -> bool {
+        self.0 == 0
+    }
+    
+    pub fn is_protected(&self) -> bool {
+        self.0 == 1
+    }
+    
+    pub fn to_u32(&self) -> u32 {
+        self.0
+    }
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct Installment {
-    pub number: u32,                            // Número de cuota (1, 2, 3...)
-    pub amount: i128,                           // Monto de la cuota en tokens
-    pub due_date: u64,                          // Fecha de vencimiento (timestamp)
-    pub paid_at: Option<u64>,                   // Fecha de pago (si fue pagada)
-    pub payment_source: Option<PaymentSource>,  // Desde dónde se pagó
-    pub status: InstallmentStatus,              // Estado actual de la cuota
+    pub number: u32,
+    pub amount: i128,
+    pub due_date: u64,
+    pub paid_at: Option<u64>,
+    pub payment_source: Option<PaymentSource>,
+    pub status: InstallmentStatus,
 }
 
 #[contracttype]
@@ -432,7 +454,7 @@ impl BridgeContract {
             }
             
             log!(&env, "Cobrado desde Available: {} shares", shares_needed);
-            PaymentSource::Available
+            PaymentSource::available()
             
         } else if balance.protected_shares >= shares_needed {
             
@@ -447,7 +469,7 @@ impl BridgeContract {
                 });
             
             log!(&env, "Cobrado desde Protected: {} shares", shares_needed);
-            PaymentSource::Protected
+            PaymentSource::protected() 
             
         } else {
             
@@ -465,7 +487,7 @@ impl BridgeContract {
         // ===== ACTUALIZAR ESTADO DE LA CUOTA =====
         
         installment.paid_at = Some(current_time);
-        installment.payment_source = Some(payment_source.clone());
+        installment.payment_source = Some(payment_source);
         installment.status = InstallmentStatus::Paid;
         
         plan.installments.set(installment_index, installment);
@@ -497,7 +519,7 @@ impl BridgeContract {
             symbol_short!("inst_paid"),
             plan_id,
             installment_number,
-            payment_source.clone(),
+            payment_source,
             shares_needed,
         ), ());
         
@@ -545,5 +567,122 @@ impl BridgeContract {
         
         // Retorna: (plan, valor_disponible, valor_protegido)
         Ok((plan, available_value, protected_value))
+    }
+
+    }
+
+// ============ TESTS CON MOCK BUFFER ============
+
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env, Vec as SorobanVec};
+    
+    // Mock SIMPLE sin tipos complejos
+    #[contract]
+    pub struct MockBuffer;
+
+    #[contractimpl]
+    impl MockBuffer {
+        pub fn get_balance(_env: Env, _user: Address) -> (i128, i128, i128) {
+            (10000, 0, 10000) // (available, protected, total)
+        }
+
+        pub fn lock_shares(_env: Env, _user: Address, shares: i128) -> (i128, i128, i128) {
+            (shares, 10000 - shares, shares)
+        }
+
+        pub fn unlock_shares(_env: Env, _user: Address, shares: i128) -> (i128, i128, i128) {
+            (shares, 10000 + shares, 0)
+        }
+
+        pub fn debit_available(_env: Env, _user: Address, shares: i128, _to: Address) -> (i128, i128, bool) {
+            (shares, 10000 - shares, false)
+        }
+
+        pub fn debit_protected(_env: Env, _user: Address, shares: i128, _to: Address) -> (i128, i128, bool) {
+            (shares, 10000, true)
+        }
+
+        pub fn get_values(_env: Env, _user: Address) -> (i128, i128, i128) {
+            (10000, 0, 10000)
+        }
+
+        pub fn shares_for_amount(_env: Env, amount: i128) -> i128 {
+            amount
+        }
+    }
+
+    pub struct TestContext {
+        pub env: Env,
+        pub user: Address,
+        pub merchant: Address,
+        pub buffer: Address,
+        pub bridge: Address,
+    }
+
+    impl TestContext {
+        pub fn new() -> Self {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_timestamp(1000);
+
+            let buffer = env.register(MockBuffer, ());
+            let bridge = env.register(BridgeContract, ());
+
+            Self {
+                env: env.clone(),
+                user: Address::generate(&env),
+                merchant: Address::generate(&env),
+                buffer,
+                bridge,
+            }
+        }
+
+        pub fn client(&self) -> BridgeContractClient {
+            BridgeContractClient::new(&self.env, &self.bridge)
+        }
+
+        pub fn advance_time(&self, seconds: u64) {
+            self.env.ledger().set_timestamp(self.env.ledger().timestamp() + seconds);
+        }
+    }
+
+    #[test]
+    fn test_create_plan_basic() {
+        let ctx = TestContext::new();
+        let client = ctx.client();
+
+        let due_dates = SorobanVec::from_array(&ctx.env, [2000u64, 3000, 4000]);
+        let plan_id = client.create_plan(&ctx.user, &ctx.merchant, &3000, &3, &due_dates, &ctx.buffer);
+        let plan = client.get_plan(&plan_id);
+
+        assert_eq!(plan.user, ctx.user);
+        assert_eq!(plan.merchant, ctx.merchant);
+        assert_eq!(plan.total_amount, 3000);
+        assert_eq!(plan.installments.len(), 3);
+    }
+
+    #[test]
+    fn test_full_lifecycle() {
+        let ctx = TestContext::new();
+        let client = ctx.client();
+
+        let due_dates = SorobanVec::from_array(&ctx.env, [2000u64, 3000, 4000]);
+        let plan_id = client.create_plan(&ctx.user, &ctx.merchant, &3000, &3, &due_dates, &ctx.buffer);
+
+        ctx.advance_time(1500);
+        let source = client.collect_installment(&plan_id, &1, &ctx.buffer, &ctx.merchant);
+        assert_eq!(source.to_u32(), 0);
+
+        ctx.advance_time(1000);
+        client.collect_installment(&plan_id, &2, &ctx.buffer, &ctx.merchant);
+
+        ctx.advance_time(1000);
+        client.collect_installment(&plan_id, &3, &ctx.buffer, &ctx.merchant);
+
+        let final_plan = client.get_plan(&plan_id);
+        assert_eq!(final_plan.status, PlanStatus::Completed);
     }
 }
