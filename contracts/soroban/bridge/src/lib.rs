@@ -5,34 +5,34 @@ use soroban_sdk::{
     symbol_short, log, Error as SorobanError,
 };
 
-// ============ TIPOS DE DATOS ============
+// ============ DATA TYPES ============
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    Plan(String),           // Plan identificado por plan_id
-    UserPlans(Address),     // Lista de planes de un usuario
-    PlanCounter,            // Contador para generar IDs únicos
+    Plan(String),           // Plan identified by plan_id
+    UserPlans(Address),     // List of plans for a user
+    PlanCounter,            // Counter to generate unique IDs
 }
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlanStatus {
-    Active,      // Plan activo con cuotas pendientes
-    Completed,   // Plan completado - todas las cuotas pagadas
-    Defaulted,   // Plan en default - falló alguna cuota
+    Active,      // Active plan with pending installments
+    Completed,   // Plan completed - all installments paid
+    Defaulted,   // Plan in default - some installment failed
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstallmentStatus {
-    Pending,  // Cuota pendiente de pago
-    Paid,     // Cuota pagada exitosamente
-    Failed,   // Cuota falló por falta de fondos
+    Pending,  // Installment pending payment
+    Paid,     // Installment paid successfully
+    Failed,   // Installment failed due to lack of funds
 }
 
 // ============================================================
-// NOTA TÉCNICA: Implementación de PaymentSource
+// TECHNICAL NOTE: PaymentSource implementation
 // ============================================================
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,95 +74,106 @@ pub struct Installment {
 #[contracttype]
 #[derive(Clone)]
 pub struct BridgePlan {
-    pub plan_id: String,             // ID único del plan
-    pub user: Address,               // Usuario que creó el plan
-    pub merchant: Address,           // Comercio que recibe los pagos
-    pub total_amount: i128,          // Monto total del plan en tokens
-    pub total_shares: i128,          // Total de shares bloqueados como garantía
-    pub installments_count: u32,     // Cantidad de cuotas
-    pub installments: Vec<Installment>, // Lista de cuotas del plan
-    pub protected_shares: i128,      // Shares actualmente protegidos (va disminuyendo)
-    pub status: PlanStatus,          // Estado actual del plan
-    pub created_at: u64,             // Timestamp de creación
+    pub plan_id: String,             // Unique plan ID
+    pub user: Address,               // User who created the plan
+    pub merchant: Address,           // Merchant who receives payments
+    pub total_amount: i128,          // Total plan amount in tokens
+    pub total_shares: i128,          // Total shares locked as collateral
+    pub installments_count: u32,     // Number of installments
+    pub installments: Vec<Installment>, // List of plan installments
+    pub protected_shares: i128,      // Shares currently protected (decreasing)
+    pub status: PlanStatus,          // Current plan status
+    pub created_at: u64,             // Creation timestamp
 }
 
-// ============ INTERFAZ DEL BUFFER CONTRACT ============
+// ============ BUFFER CONTRACT INTERFACE ============
 
 #[contracttype]
 #[derive(Clone)]
 pub struct BufferBalance {
-    pub available_shares: i128,    // Shares disponibles para usar
-    pub protected_shares: i128,    // Shares bloqueados como garantía
-    pub total_deposited: i128,     // Total depositado históricamente
-    pub last_deposit_ts: u64,      // Timestamp del último depósito
-    pub version: u64,              // Versión del balance
+    pub available_shares: i128,    // Shares available for use
+    pub protected_shares: i128,    // Shares locked as collateral
+    pub total_deposited: i128,     // Total deposited historically
+    pub last_deposit_ts: u64,      // Timestamp of last deposit
+    pub version: u64,              // Balance version
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct LockResult {
-    pub shares_locked: i128,       // Cantidad de shares que se bloquearon
-    pub new_available: i128,       // Nuevo balance de shares disponibles
-    pub new_protected: i128,       // Nuevo balance de shares protegidos
+    pub shares_locked: i128,       // Amount of shares that were locked
+    pub new_available: i128,       // New balance of available shares
+    pub new_protected: i128,       // New balance of protected shares
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct WithdrawResult {
-    pub shares_burned: i128,            // Shares quemados en la operación
-    pub amounts_received: Vec<i128>,    // Montos recibidos por asset
-    pub new_available_balance: i128,    // Nuevo balance disponible
-    pub from_protected: bool,           // Si se debitó desde protegido
+    pub shares_burned: i128,            // Shares burned in the operation
+    pub amounts_received: Vec<i128>,    // Amounts received per asset
+    pub new_available_balance: i128,    // New available balance
+    pub from_protected: bool,           // Whether debited from protected
 }
 
-// Cliente para llamar funciones del Buffer Contract
+// Client to call Buffer Contract functions
 #[contractclient(name = "BufferContractClient")]
 pub trait BufferContract {
-    // Obtener balance del usuario
+    // Get user balance
     fn get_balance(env: Env, user: Address) -> BufferBalance;
     
-    // Bloquear shares como garantía
+    // Lock shares as collateral
     fn lock_shares(env: Env, user: Address, shares: i128) -> LockResult;
     
-    // Desbloquear shares (liberar garantía)
+    // Unlock shares (release collateral)
     fn unlock_shares(env: Env, user: Address, shares: i128) -> LockResult;
     
-    // Debitar desde shares disponibles
+    // Debit from available shares
     fn debit_available(env: Env, user: Address, shares: i128, to: Address) -> WithdrawResult;
     
-    // Debitar desde shares protegidos (fallback)
+    // Debit from protected shares (fallback)
     fn debit_protected(env: Env, user: Address, shares: i128, to: Address) -> WithdrawResult;
     
-    // Obtener valores en tokens (disponible, protegido, total)
+    // Get values in tokens (available, protected, total)
     fn get_values(env: Env, user: Address) -> (i128, i128, i128);
     
-    // Calcular shares necesarios para un monto en tokens
+    // Calculate shares needed for a token amount
     fn shares_for_amount(env: Env, amount: i128) -> i128;
 }
 
-// ============ ERRORES ============
+// ============ COLLATERALIZATION CONSTANTS ============
+
+/// Maximum Loan-to-Value ratio in basis points (10000 = 100%)
+/// 8000 = 80% - Plan can use up to 80% of total Buffer value
+const MAX_LTV_BPS: i128 = 8000;
+
+/// Liquidation threshold in basis points (for future alerts)
+/// 8500 = 85% - Point where risk should be alerted
+const LIQUIDATION_THRESHOLD_BPS: i128 = 8500;
+
+// ============ ERRORS ============
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
-    InvalidAmount = 1,           // Monto inválido o negativo
-    InvalidInstallments = 2,     // Cantidad de cuotas inválida (0 o >12)
-    InsufficientCollateral = 3,  // Buffer total menor al monto solicitado
-    InsufficientAvailable = 4,   // Buffer disponible insuficiente para bloquear
-    DatesMismatch = 5,           // Cantidad de fechas no coincide con cuotas
-    InvalidDueDate = 6,          // Fecha de vencimiento en el pasado
-    PlanNotFound = 7,            // Plan no encontrado en storage
-    InstallmentNotFound = 8,     // Cuota no encontrada en el plan
-    AlreadyPaid = 9,             // Cuota ya fue pagada
-    NotDueYet = 10,              // Cuota todavía no venció
-    InsufficientFunds = 11,      // Fondos insuficientes para pagar cuota
-    TooManyInstallments = 12,    // Más de 12 cuotas solicitadas
-    BufferContractError = 13,    // Error al llamar al Buffer Contract
-    InvalidShares = 14,          // Cálculo de shares inválido
+    InvalidAmount = 1,           // Invalid or negative amount
+    InvalidInstallments = 2,     // Invalid installment quantity (0 or >12)
+    InsufficientCollateral = 3,  // Total buffer less than requested amount
+    InsufficientAvailable = 4,   // Insufficient available buffer to lock
+    DatesMismatch = 5,           // Number of dates does not match installments
+    InvalidDueDate = 6,          // Due date in the past
+    PlanNotFound = 7,            // Plan not found in storage
+    InstallmentNotFound = 8,     // Installment not found in plan
+    AlreadyPaid = 9,             // Installment already paid
+    NotDueYet = 10,              // Installment not yet due
+    InsufficientFunds = 11,      // Insufficient funds to pay installment
+    TooManyInstallments = 12,    // More than 12 installments requested
+    BufferContractError = 13,    // Error calling Buffer Contract
+    InvalidShares = 14,          // Invalid shares calculation
+    ExceedsMaxLTV = 15,          // Plan exceeds maximum Loan-to-Value ratio
 }
 
-// Conversión de nuestro error a SorobanError
+// Conversion of our error to SorobanError
 impl From<ContractError> for SorobanError {
     fn from(e: ContractError) -> Self {
         SorobanError::from_contract_error(e as u32)
@@ -175,14 +186,14 @@ impl From<&ContractError> for SorobanError {
     }
 }
 
-// Conversión de SorobanError a nuestro error (catch-all)
+// Conversion of SorobanError to our error (catch-all)
 impl From<SorobanError> for ContractError {
     fn from(_: SorobanError) -> Self {
         ContractError::BufferContractError
     }
 }
 
-// ============ CONTRATO PRINCIPAL ============
+// ============ MAIN CONTRACT ============
 
 #[contract]
 pub struct BridgeContract;
@@ -190,104 +201,112 @@ pub struct BridgeContract;
 #[contractimpl]
 impl BridgeContract {
     
-    /// Crear un plan de cuotas
+    /// Create an installment plan
     /// 
-    /// Crea un nuevo plan de financiamiento en cuotas, bloqueando shares
-    /// del Buffer como garantía. Valida que el usuario tenga suficiente
-    /// colateral y bloquea los shares necesarios.
+    /// Creates a new installment financing plan, locking Buffer shares
+    /// as collateral. Validates that the user has sufficient collateral
+    /// and locks the necessary shares.
     pub fn create_plan(
         env: Env,
-        user: Address,               // Usuario que crea el plan
-        merchant: Address,           // Comercio que recibirá los pagos
-        total_amount: i128,          // Monto total a financiar
-        installments_count: u32,     // Cantidad de cuotas (1-12)
-        due_dates: Vec<u64>,         // Fechas de vencimiento de cada cuota
-        buffer_contract: Address,    // Dirección del Buffer Contract
+        user: Address,               // User who creates the plan
+        merchant: Address,           // Merchant who will receive payments
+        total_amount: i128,          // Total amount to finance
+        installments_count: u32,     // Number of installments (1-12)
+        due_dates: Vec<u64>,         // Due dates of each installment
+        buffer_contract: Address,    // Address of Buffer Contract
     ) -> Result<String, ContractError> {
         
-        // Verificar que el usuario firmó la transacción
+        // Verify that user signed the transaction
         user.require_auth();
         
-        // ===== VALIDACIONES BÁSICAS =====
+        // ===== BASIC VALIDATIONS =====
         
         if total_amount <= 0 {
-            log!(&env, "Error: Monto inválido {}", total_amount);
+            log!(&env, "Error: Invalid amount {}", total_amount);
             return Err(ContractError::InvalidAmount);
         }
         
         if installments_count == 0 || installments_count > 12 {
-            log!(&env, "Error: Cantidad de cuotas inválida {}", installments_count);
+            log!(&env, "Error: Invalid installment quantity {}", installments_count);
             return Err(ContractError::InvalidInstallments);
         }
         
         if due_dates.len() != installments_count {
-            log!(&env, "Error: Cantidad de fechas {} no coincide con cuotas {}", 
+            log!(&env, "Error: Number of dates {} does not match installments {}", 
                 due_dates.len(), installments_count);
             return Err(ContractError::DatesMismatch);
         }
         
-        // Validar que todas las fechas estén en el futuro
+        // Validate that all dates are in the future
         let current_time = env.ledger().timestamp();
         for i in 0..due_dates.len() {
             let date = due_dates.get(i).unwrap();
             if date <= current_time {
-                log!(&env, "Error: Fecha de vencimiento en el pasado {}", date);
+                log!(&env, "Error: Due date in the past {}", date);
                 return Err(ContractError::InvalidDueDate);
             }
         }
         
-        // ===== CONSULTAR BUFFER Y VALIDAR COLATERALIZACIÓN =====
+        // ===== QUERY BUFFER AND VALIDATE COLLATERALIZATION =====
         
         let buffer_client = BufferContractClient::new(&env, &buffer_contract);
         
-        // Obtener valores en tokens para validación
+        // Get values in tokens for validation
         let (available_value, _, total_value) = buffer_client.get_values(&user);
         
-        // Validar que el Buffer total sea >= al monto solicitado
-        if total_amount > total_value {
-            log!(&env, "Error: Colateral insuficiente {} > {}", total_amount, total_value);
-            return Err(ContractError::InsufficientCollateral);
+        // ===== LTV VALIDATION: Calculate maximum allowed amount =====
+        // MAX_LTV_BPS = 8000 means 80%
+        // max_bridge_amount = total_value * 80 / 100 = total_value * 0.8
+        let max_bridge_amount = (total_value * MAX_LTV_BPS) / 10000;
+        
+        log!(&env, "Total Buffer: {}, Max allowed (LTV 80%): {}, Requested: {}", 
+            total_value, max_bridge_amount, total_amount);
+        
+        // Validate plan doesn't exceed maximum LTV
+        if total_amount > max_bridge_amount {
+            log!(&env, "Error: Plan exceeds max LTV {} > {}", total_amount, max_bridge_amount);
+            return Err(ContractError::ExceedsMaxLTV);
         }
         
-        // Validar que haya suficiente disponible para bloquear
+        // Validate that there is sufficient available to lock
         if total_amount > available_value {
-            log!(&env, "Error: Balance disponible insuficiente {} > {}", 
+            log!(&env, "Error: Insufficient available balance {} > {}", 
                 total_amount, available_value);
             return Err(ContractError::InsufficientAvailable);
         }
         
-        // Calcular cuántos shares se necesitan bloquear
+        // Calculate how many shares need to be locked
         let shares_needed = buffer_client.shares_for_amount(&total_amount);
         
         if shares_needed <= 0 {
-            log!(&env, "Error: Cálculo de shares inválido");
+            log!(&env, "Error: Invalid shares calculation");
             return Err(ContractError::InvalidShares);
         }
         
-        // ===== BLOQUEAR SHARES EN EL BUFFER =====
+        // ===== LOCK SHARES IN BUFFER =====
         
         let _lock_result = buffer_client.lock_shares(&user, &shares_needed);
         
-        // ===== GENERAR ID ÚNICO DEL PLAN =====
+        // ===== GENERATE UNIQUE PLAN ID =====
         
         let counter: u64 = env.storage()
             .instance()
             .get(&DataKey::PlanCounter)
             .unwrap_or(0);
         
-        // Crear ID desde bytes (evita problemas con to_string())
+        // Create ID from bytes (avoids issues with to_string())
         let mut id_bytes = [0u8; 16];
         id_bytes[0..8].copy_from_slice(&counter.to_be_bytes());
         let plan_id = String::from_bytes(&env, &id_bytes);
         
-        // Incrementar contador para el próximo plan
+        // Increment counter for next plan
         env.storage()
             .instance()
             .set(&DataKey::PlanCounter, &(counter + 1));
         
-        // ===== CALCULAR CUOTAS =====
+        // ===== CALCULATE INSTALLMENTS =====
         
-        // Dividir el monto total en cuotas iguales
+        // Divide total amount into equal installments
         let amount_per_installment = total_amount / installments_count as i128;
         let remainder = total_amount % installments_count as i128;
         
@@ -296,7 +315,7 @@ impl BridgeContract {
         for i in 0..installments_count {
             let mut amount = amount_per_installment;
             
-            // La última cuota lleva el remainder para completar el total exacto
+            // The last installment carries the remainder to complete the exact total
             if i == installments_count - 1 {
                 amount += remainder;
             }
@@ -313,10 +332,10 @@ impl BridgeContract {
             installments.push_back(installment);
         }
         
-        // Clonar merchant para poder usarlo dos veces
+        // Clone merchant to use it twice
         let merchant_for_plan = merchant.clone();
         
-        // ===== CREAR Y GUARDAR PLAN =====
+        // ===== CREATE AND SAVE PLAN =====
         
         let plan = BridgePlan {
             plan_id: plan_id.clone(),
@@ -326,17 +345,17 @@ impl BridgeContract {
             total_shares: shares_needed,
             installments_count,
             installments: installments.clone(),
-            protected_shares: shares_needed,  // Inicialmente todos los shares están protegidos
+            protected_shares: shares_needed,  // Initially all shares are protected
             status: PlanStatus::Active,
             created_at: current_time,
         };
         
-        // Guardar plan en storage persistente
+        // Save plan in persistent storage
         env.storage()
             .persistent()
             .set(&DataKey::Plan(plan_id.clone()), &plan);
         
-        // Agregar plan a la lista de planes del usuario
+        // Add plan to user's plan list
         let mut user_plans: Vec<String> = env.storage()
             .persistent()
             .get(&DataKey::UserPlans(user.clone()))
@@ -348,7 +367,7 @@ impl BridgeContract {
             .persistent()
             .set(&DataKey::UserPlans(user.clone()), &user_plans);
         
-        // ===== EMITIR EVENTO =====
+        // ===== EMIT EVENT =====
         
         env.events().publish((
             symbol_short!("plan_new"),
@@ -360,12 +379,12 @@ impl BridgeContract {
             shares_needed,
         ), ());
         
-        log!(&env, "Plan Bridge creado con {} shares bloqueados", shares_needed);
+        log!(&env, "Bridge plan created with {} shares locked", shares_needed);
         
         Ok(plan_id)
     }
     
-    /// Consultar un plan por su ID
+    /// Query a plan by its ID
     pub fn get_plan(env: Env, plan_id: String) -> Result<BridgePlan, ContractError> {
         env.storage()
             .persistent()
@@ -373,7 +392,7 @@ impl BridgeContract {
             .ok_or(ContractError::PlanNotFound)
     }
     
-    /// Obtener todos los planes de un usuario
+    /// Get all plans for a user
     pub fn get_user_plans(env: Env, user: Address) -> Vec<String> {
         env.storage()
             .persistent()
@@ -381,67 +400,67 @@ impl BridgeContract {
             .unwrap_or(Vec::new(&env))
     }
     
-    /// Cobrar una cuota (llamado por worker automático)
+    /// Collect an installment (called by automatic worker)
     /// 
-    /// Intenta cobrar una cuota vencida. Primero intenta desde shares disponibles,
-    /// si no alcanza hace fallback a shares protegidos. Si tampoco alcanza,
-    /// marca la cuota como fallida y el plan como defaulted.
+    /// Attempts to collect an overdue installment. First tries from available shares,
+    /// if insufficient falls back to protected shares. If still insufficient,
+    /// marks the installment failed and plan as defaulted.
     pub fn collect_installment(
         env: Env,
-        plan_id: String,             // ID del plan
-        installment_number: u32,     // Número de cuota a cobrar
-        buffer_contract: Address,    // Dirección del Buffer Contract
-        merchant_address: Address,   // Dirección del comercio (recibe el pago)
+        plan_id: String,             // Plan ID
+        installment_number: u32,     // Installment number to collect
+        buffer_contract: Address,    // Buffer Contract address
+        merchant_address: Address,   // Merchant address (receives payment)
     ) -> Result<PaymentSource, ContractError> {
         
-        // ===== OBTENER PLAN Y VALIDAR =====
+        // ===== GET AND VALIDATE PLAN =====
         
         let mut plan: BridgePlan = env.storage()
             .persistent()
             .get(&DataKey::Plan(plan_id.clone()))
             .ok_or(ContractError::PlanNotFound)?;
         
-        // Verificar autenticación del usuario
+        // Verify user authentication
         plan.user.require_auth();
         
-        // Buscar la cuota en el plan
+        // Search for installment in plan
         let installment_index = installment_number - 1;
         
         if installment_index >= plan.installments.len() {
-            log!(&env, "Error: Cuota no encontrada {}", installment_number);
+            log!(&env, "Error: Installment not found {}", installment_number);
             return Err(ContractError::InstallmentNotFound);
         }
         
         let mut installment = plan.installments.get(installment_index).unwrap();
         
-        // Validar que la cuota esté pendiente
+        // Validate that installment is pending
         if installment.status != InstallmentStatus::Pending {
-            log!(&env, "Error: Cuota ya fue pagada {}", installment_number);
+            log!(&env, "Error: Installment already paid {}", installment_number);
             return Err(ContractError::AlreadyPaid);
         }
         
-        // Validar que la cuota ya venció
+        // Validate that installment is due
         let current_time = env.ledger().timestamp();
         
         if current_time < installment.due_date {
-            log!(&env, "Error: Cuota todavía no venció {}", installment_number);
+            log!(&env, "Error: Installment not yet due {}", installment_number);
             return Err(ContractError::NotDueYet);
         }
         
-        // ===== CALCULAR SHARES NECESARIOS Y OBTENER BALANCE =====
+        // ===== CALCULATE NEEDED SHARES AND GET BALANCE =====
         
         let buffer_client = BufferContractClient::new(&env, &buffer_contract);
         let shares_needed = buffer_client.shares_for_amount(&installment.amount);
         let balance = buffer_client.get_balance(&plan.user);
         
-        // ===== INTENTAR COBRAR (Available primero, Protected como fallback) =====
+        // ===== ATTEMPT COLLECTION (Available first, Protected as fallback) =====
         
         let payment_source = if balance.available_shares >= shares_needed {
             
-            // CASO 1: Cobrar desde shares disponibles
+            // CASE 1: Collect from available shares
             buffer_client.debit_available(&plan.user, &shares_needed, &merchant_address);
             
-            // Actualizar shares protegidos proporcionalmente
+            // Update protected shares proportionally
             if plan.total_amount > 0 {
                 let shares_to_unlock = (shares_needed as i128)
                     .checked_mul(plan.total_shares)
@@ -453,28 +472,28 @@ impl BridgeContract {
                     .unwrap_or(0);
             }
             
-            log!(&env, "Cobrado desde Available: {} shares", shares_needed);
+            log!(&env, "Collected from Available: {} shares", shares_needed);
             PaymentSource::available()
             
         } else if balance.protected_shares >= shares_needed {
             
-            // CASO 2: Fallback - Cobrar desde shares protegidos
+            // CASE 2: Fallback - Collect from protected shares
             buffer_client.debit_protected(&plan.user, &shares_needed, &merchant_address);
             
-            // Reducir shares protegidos del plan
+            // Reduce plan's protected shares
             plan.protected_shares = plan.protected_shares.checked_sub(shares_needed)
                 .unwrap_or_else(|| {
                     log!(&env, "Error: Shares protegidos insuficientes");
                     0
                 });
             
-            log!(&env, "Cobrado desde Protected: {} shares", shares_needed);
+            log!(&env, "Collected from Protected: {} shares", shares_needed);
             PaymentSource::protected() 
             
         } else {
             
-            // CASO 3: Fondos insuficientes - Marcar como fallida
-            log!(&env, "Error: Fondos insuficientes para cuota {}", installment_number);
+            // CASE 3: Insufficient funds - Mark as failed
+            log!(&env, "Error: Insufficient funds for installment {}", installment_number);
             installment.status = InstallmentStatus::Failed;
             plan.status = PlanStatus::Defaulted;
             
@@ -484,7 +503,7 @@ impl BridgeContract {
             return Err(ContractError::InsufficientFunds);
         };
         
-        // ===== ACTUALIZAR ESTADO DE LA CUOTA =====
+        // ===== UPDATE INSTALLMENT STATUS =====
         
         installment.paid_at = Some(current_time);
         installment.payment_source = Some(payment_source);
@@ -492,7 +511,7 @@ impl BridgeContract {
         
         plan.installments.set(installment_index, installment);
         
-        // ===== VERIFICAR SI EL PLAN SE COMPLETÓ =====
+        // ===== CHECK IF PLAN IS COMPLETE =====
         
         let all_paid = (0..plan.installments.len()).all(|i| {
             plan.installments.get(i).unwrap().status == InstallmentStatus::Paid
@@ -501,15 +520,15 @@ impl BridgeContract {
         if all_paid {
             plan.status = PlanStatus::Completed;
             
-            // Liberar shares protegidos restantes (si los hay)
+            // Release remaining protected shares (if any)
             if plan.protected_shares > 0 {
                 buffer_client.unlock_shares(&plan.user, &plan.protected_shares);
-                log!(&env, "Liberados {} shares restantes", plan.protected_shares);
+                log!(&env, "Released {} remaining shares", plan.protected_shares);
                 plan.protected_shares = 0;
             }
         }
         
-        // ===== GUARDAR PLAN ACTUALIZADO =====
+        // ===== SAVE UPDATED PLAN =====
         
         env.storage().persistent().set(&DataKey::Plan(plan_id.clone()), &plan);
         
@@ -526,10 +545,10 @@ impl BridgeContract {
         Ok(payment_source)
     }
     
-    /// Obtener la próxima cuota vencida de un plan
+    /// Get the next due installment of a plan
     /// 
-    /// Busca la primera cuota que esté pendiente y ya haya vencido.
-    /// Útil para workers automáticos que procesan cobros.
+    /// Searches for the first installment that is pending and already due.
+    /// Useful for automatic workers that process collections.
     pub fn get_next_due(env: Env, plan_id: String) -> Result<Option<Installment>, ContractError> {
         let plan: BridgePlan = env.storage()
             .persistent()
@@ -538,7 +557,7 @@ impl BridgeContract {
         
         let current_time = env.ledger().timestamp();
         
-        // Buscar primera cuota pendiente y vencida
+        // Search for first pending and due installment
         for i in 0..plan.installments.len() {
             let installment = plan.installments.get(i).unwrap();
             if installment.status == InstallmentStatus::Pending 
@@ -547,14 +566,14 @@ impl BridgeContract {
             }
         }
         
-        // No hay cuotas vencidas
+        // No due installments
         Ok(None)
     }
     
-    /// Obtener resumen completo del plan con valores actualizados del Buffer
+    /// Get complete plan summary with updated Buffer values
     /// 
-    /// Retorna el plan junto con los valores actuales en tokens del Buffer
-    /// del usuario (disponible y protegido). Útil para mostrar en UI.
+    /// Returns the plan along with the current token values of the user's Buffer
+    /// (available and protected). Useful for displaying in UI.
     pub fn get_plan_summary(
         env: Env, 
         plan_id: String, 
@@ -565,13 +584,13 @@ impl BridgeContract {
         let buffer_client = BufferContractClient::new(&env, &buffer_contract);
         let (available_value, protected_value, _total_value) = buffer_client.get_values(&plan.user);
         
-        // Retorna: (plan, valor_disponible, valor_protegido)
+        // Returns: (plan, available_value, protected_value)
         Ok((plan, available_value, protected_value))
     }
 
     }
 
-// ============ TESTS CON MOCK BUFFER ============
+// ============ TESTS WITH MOCK BUFFER ============
 
 
 #[cfg(test)]
@@ -579,7 +598,7 @@ mod test {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env, Vec as SorobanVec};
     
-    // Mock SIMPLE sin tipos complejos
+    // Simple MOCK without complex types
     #[contract]
     pub struct MockBuffer;
 
@@ -684,5 +703,41 @@ mod test {
 
         let final_plan = client.get_plan(&plan_id);
         assert_eq!(final_plan.status, PlanStatus::Completed);
+    }
+
+    #[test]
+    fn test_ltv_max_allowed() {
+        let ctx = TestContext::new();
+        let client = ctx.client();
+
+        // Buffer total = 10000, LTV 80% = 8000 maximum allowed
+        let due_dates = SorobanVec::from_array(&ctx.env, [2000u64, 3000, 4000]);
+        let plan_id = client.create_plan(&ctx.user, &ctx.merchant, &8000, &3, &due_dates, &ctx.buffer);
+        let plan = client.get_plan(&plan_id);
+
+        assert_eq!(plan.total_amount, 8000);
+        assert_eq!(plan.status, PlanStatus::Active);
+    }
+
+    #[test]
+    #[should_panic(expected = "Status(ContractError(15))")] // ExceedsMaxLTV
+    fn test_ltv_exceeds_maximum() {
+        let ctx = TestContext::new();
+        let client = ctx.client();
+
+        // Attempt to create plan for 9000 when maximum is 8000 (80% of 10000)
+        let due_dates = SorobanVec::from_array(&ctx.env, [2000u64, 3000, 4000]);
+        client.create_plan(&ctx.user, &ctx.merchant, &9000, &3, &due_dates, &ctx.buffer);
+    }
+
+    #[test]
+    #[should_panic(expected = "Status(ContractError(15))")] // ExceedsMaxLTV
+    fn test_ltv_at_100_percent_fails() {
+        let ctx = TestContext::new();
+        let client = ctx.client();
+
+        // Attempting to use 100% of buffer (10000) should fail
+        let due_dates = SorobanVec::from_array(&ctx.env, [2000u64, 3000, 4000]);
+        client.create_plan(&ctx.user, &ctx.merchant, &10000, &3, &due_dates, &ctx.buffer);
     }
 }
