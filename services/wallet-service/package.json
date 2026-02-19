@@ -12,9 +12,11 @@
     "test": "echo \"Add tests\""
   },
   "dependencies": {
-    "@redi/crossmint": "workspace:^",
     "@redi/config": "workspace:^",
+    "@redi/crossmint": "workspace:^",
     "@stellar/stellar-sdk": "^14.5.0",
+    "@supabase/supabase-js": "^2.95.3",
+    "axios": "^1.13.5",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
