@@ -1,6 +1,10 @@
-# DeFindex Vault Creation Guide
+**Correcto, está enfocado en USDC pero trabajaste con XLM. Aquí está la versión corregida y consistente:**
 
-**Target Audience:** Developers integrating DeFindex yield vaults into Stellar/Soroban applications  
+---
+
+# DeFindex Vault Creation Guide - XLM Implementation
+
+**Target Audience:** Developers integrating DeFindex XLM yield vaults into Stellar/Soroban applications  
 **Prerequisites:** Basic understanding of Stellar blockchain, testnet funded wallet, curl/jq installed
 
 ---
@@ -11,10 +15,11 @@
 2. [Prerequisites & Setup](#2-prerequisites--setup)
 3. [Authentication Process](#3-authentication-process)
 4. [Asset & Strategy Discovery](#4-asset--strategy-discovery)
-5. [Vault Creation](#5-vault-creation)
+5. [Vault Creation with XLM](#5-vault-creation-with-xlm)
 6. [Transaction Signing & Submission](#6-transaction-signing--submission)
 7. [Vault Verification](#7-vault-verification)
-8. [Troubleshooting](#8-troubleshooting)
+8. [Buffer Contract Integration](#8-buffer-contract-integration)
+9. [Troubleshooting](#9-troubleshooting)
 
 ---
 
@@ -30,7 +35,7 @@ DeFindex is a decentralized vault protocol on Stellar that automatically deploys
 
 **Strategy:** A specific DeFi protocol integration (e.g., Blend lending, Soroswap liquidity pools) where the vault deploys capital to earn yield.
 
-**Asset:** A Stellar Asset Contract (SAC) that the vault accepts for deposits (e.g., USDC, XLM).
+**Asset:** A Stellar Asset Contract (SAC) that the vault accepts for deposits. In this guide, we use **native XLM**.
 
 **Shares:** When you deposit into a vault, you receive vault shares representing your proportional ownership. Share value appreciates as strategies generate yield.
 
@@ -46,17 +51,19 @@ DeFindex is a decentralized vault protocol on Stellar that automatically deploys
 ### Architecture Flow
 
 ```
-User Deposit (USDC)
+User Deposit (XLM)
+        ↓
+Buffer Contract (your app layer)
         ↓
 DeFindex Vault Contract
         ↓
-Strategy Selection (Blend, Soroswap, etc.)
+Strategy Selection (Blend)
         ↓
 Yield Generation
         ↓
 Share Value Appreciation
         ↓
-User Withdrawal (USDC + yield)
+User Withdrawal (XLM + yield)
 ```
 
 ---
@@ -72,11 +79,12 @@ sudo apt install -y jq curl
 # Verify installation
 jq --version
 curl --version
+
+# Install Stellar CLI
+cargo install --locked stellar-cli --features opt
 ```
 
 ### Environment Setup
-
-Add to `.env` file the configuration:
 
 ```bash
 cat > .env << 'EOF'
@@ -89,9 +97,16 @@ STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 ADMIN_STELLAR_SECRET=SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ADMIN_STELLAR_ADDRESS=GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
-# DeFindex Configuration (to be filled)
+# DeFindex Configuration
 DEFINDEX_API_KEY=
 DEFINDEX_VAULT_ADDRESS=
+
+# Asset Addresses (Testnet)
+XLM_CONTRACT_ADDRESS=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+BLEND_STRATEGY=CDVLOSPJPQOTB6ZCWO5VSGTOLGMKTXSFWYTUP572GTPNOWX4F76X3HPM
+
+# Buffer Contract (to be deployed)
+BUFFER_CONTRACT_ID=
 EOF
 
 # Load environment
@@ -100,32 +115,25 @@ source .env
 
 ### Fund Your Testnet Account
 
-If you don't have a funded testnet account:
-
 ```bash
-# Generate new keypair (if needed)
+# Generate new keypair
 stellar keys generate admin --network testnet
 
 # Get public address
-stellar keys address admin
+export ADMIN_STELLAR_ADDRESS=$(stellar keys address admin)
 
 # Fund via friendbot
-curl "https://friendbot.stellar.org?addr=$(stellar keys address admin)"
+curl "https://friendbot.stellar.org?addr=$ADMIN_STELLAR_ADDRESS"
 
-# Verify balance
-stellar keys balance admin --network testnet
-# Should show: 10000.0000000 XLM
+# Verify balance (should show 10,000 XLM)
+stellar balance --address $ADMIN_STELLAR_ADDRESS --network testnet
 ```
 
 ---
 
 ## 3. Authentication Process
 
-DeFindex API requires authentication for vault creation. This is a multi-step process.
-
-### Step 1: User Registration
-
-**Note:** Skip this if you already have a DeFindex account.
+### Step 1: Register with DeFindex
 
 ```bash
 curl -X POST https://api.defindex.io/register \
@@ -137,192 +145,80 @@ curl -X POST https://api.defindex.io/register \
   }' | jq .
 ```
 
-**Expected Response:**
-
-```json
-{
-  "message": "User registered successfully"
-}
-```
-
-### Step 2: Login to Obtain Access Token
+### Step 2: Login and Get Access Token
 
 ```bash
-# Login (uses EMAIL, not username)
 curl -X POST https://api.defindex.io/login \
   -H "Content-Type: application/json" \
   -d '{
     "email": "your@email.com",
     "password": "SecurePassword123!"
-  }' | jq .
+  }' | jq -r '.access_token' > /tmp/access_token.txt
+
+export ACCESS_TOKEN=$(cat /tmp/access_token.txt)
 ```
 
-**Expected Response:**
-
-```json
-{
-  "username": "your_username",
-  "role": "USER",
-  "access_token": "eyJhbGciOiJ................",
-  "refresh_token": "eyJhbGciOiJ..............."
-}
-```
-
-**Save the access token:**
-
-```bash
-ACCESS_TOKEN="eyJhbGciOi.............."
-```
-
-### Step 3: Generate API Key
-
-Access tokens expire. Generate a persistent API key for programmatic access:
+### Step 3: Generate Persistent API Key
 
 ```bash
 curl -X POST https://api.defindex.io/api-keys/generate \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" | jq .
-```
+  -H "Content-Type: application/json" | jq -r '.key' > /tmp/api_key.txt
 
-**Expected Response:**
+export DEFINDEX_API_KEY=$(cat /tmp/api_key.txt)
 
-```json
-{
-  "key": "sk_9b4................",
-  "id": 101
-}
-```
-
-**Save to environment:**
-
-```bash
-# Add to .env
-echo "DEFINDEX_API_KEY=sk_9b.................." >> .env
-
-# Reload
-source .env
+# Save to .env
+echo "DEFINDEX_API_KEY=$DEFINDEX_API_KEY" >> .env
 ```
 
 ---
 
 ## 4. Asset & Strategy Discovery
 
-### Critical Network Parameter
-
-**ALL DeFindex API calls MUST include `?network=testnet` query parameter.**
-
-Without this parameter, the API defaults to mainnet, causing "Account not found" errors for testnet addresses.
-
-### Fetch Testnet Contract Addresses
-
-DeFindex maintains an official contract registry:
+### Fetch Testnet XLM Contracts
 
 ```bash
-curl "https://raw.githubusercontent.com/paltalabs/defindex/main/public/testnet.contracts.json" | jq .
+curl "https://raw.githubusercontent.com/paltalabs/defindex/main/public/testnet.contracts.json" \
+  | jq '.ids | {xlm: .xlm, xlm_blend_strategy: .XLM_blend_strategy}'
 ```
 
-**Response Structure:**
+**Response:**
 
 ```json
 {
-  "ids": {
-    "USDC_blend_strategy": "CALLOM5I7XLQPPOPQMYAHUWW4N7O3JKT42KQ4ASEEVBXDJQNJOALFSUY",
-    "XLM_blend_strategy": "CDVLOSPJPQOTB6ZCWO5VSGTOLGMKTXSFWYTUP572GTPNOWX4F76X3HPM",
-    "defindex_factory": "CDSCWE4GLNBYYTES2OCYDFQA2LLY4RBIAX6ZI32VSUXD7GO6HRPO4A32",
-    "usdc_paltalabs_vault": "CBMVK2JK6NTOT2O4HNQAIQFJY232BHKGLIMXDVQVHIIZKDACXDFZDWHN",
-    "xlm_paltalabs_vault": "CCLV4H7WTLJVZBD3KTOEOE7CAGBNVJEU4OCBQZ6PV67SNJLKG7CE7UBV"
-  },
-  "hashes": { ... }
+  "xlm": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  "xlm_blend_strategy": "CDVLOSPJPQOTB6ZCWO5VSGTOLGMKTXSFWYTUP572GTPNOWX4F76X3HPM"
 }
 ```
 
-### Discover Existing Vaults
-
-To find compatible asset addresses, query existing vaults:
+### Verify XLM Strategy Compatibility
 
 ```bash
-curl "https://api.defindex.io/vault/discover?network=testnet" \
-  -H "Authorization: Bearer $DEFINDEX_API_KEY" | jq .
+# Query existing XLM vault
+curl "https://api.defindex.io/vault/CCLV4H7WTLJVZBD3KTOEOE7CAGBNVJEU4OCBQZ6PV67SNJLKG7CE7UBV?network=testnet" \
+  -H "Authorization: Bearer $DEFINDEX_API_KEY" | jq '.assets[0]'
 ```
 
-### Inspect Vault Configuration
-
-Examine an existing vault to understand asset/strategy relationships:
-
-```bash
-# Query PaltaLabs USDC vault
-curl "https://api.defindex.io/vault/CBMVK2JK6NTOT2O4HNQAIQFJY232BHKGLIMXDVQVHIIZKDACXDFZDWHN?network=testnet" \
-  -H "Authorization: Bearer $DEFINDEX_API_KEY" | jq .
-```
-
-**Key Information Extracted:**
+**Confirms:**
 
 ```json
 {
-  "name": "DeFindex-Vault-Defindex Vault",
-  "symbol": "DFXV",
-  "assets": [
+  "address": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  "symbol": "XLM",
+  "strategies": [
     {
-      "address": "CAQCFVLOBK5GIULPNZRGATJJMIZL5BSP7X5YJVMGCPTUEPFM4AVSRCJU",
-      "symbol": "USDC",
-      "strategies": [
-        {
-          "address": "CALLOM5I7XLQPPOPQMYAHUWW4N7O3JKT42KQ4ASEEVBXDJQNJOALFSUY",
-          "name": "USDC Blend Strategy",
-          "paused": false
-        }
-      ]
+      "address": "CDVLOSPJPQOTB6ZCWO5VSGTOLGMKTXSFWYTUP572GTPNOWX4F76X3HPM",
+      "name": "XLM Blend Strategy"
     }
-  ],
-  "totalManagedFunds": [...]
+  ]
 }
-```
-
-**Store discovered addresses:**
-
-```bash
-# Testnet USDC SAC address
-USDC_CONTRACT_ADDRESS="CAQCFVLOBK5GIULPNZRGATJJMIZL5BSP7X5YJVMGCPTUEPFM4AVSRCJU"
-
-# USDC Blend strategy
-USDC_BLEND_STRATEGY="CALLOM5I7XLQPPOPQMYAHUWW4N7O3JKT42KQ4ASEEVBXDJQNJOALFSUY"
-
-# Add to .env
-echo "USDC_CONTRACT_ADDRESS=$USDC_CONTRACT_ADDRESS" >> .env
 ```
 
 ---
 
-## 5. Vault Creation
+## 5. Vault Creation with XLM
 
-### API Endpoint Schema
-
-Retrieve the official API specification:
-
-```bash
-curl https://api.defindex.io/api-json | jq '.paths["/factory/create-vault"].post.requestBody'
-```
-
-### Request Parameters Explained
-
-| Parameter                       | Type    | Description                                   |
-| ------------------------------- | ------- | --------------------------------------------- |
-| `caller`                        | String  | Your Stellar public address (G...)            |
-| `roles`                         | Object  | Role assignments using numeric keys           |
-| `roles["0"]`                    | String  | Emergency Manager - can pause vault in crisis |
-| `roles["1"]`                    | String  | Fee Receiver - receives management fees       |
-| `roles["2"]`                    | String  | Vault Manager - can update strategies         |
-| `roles["3"]`                    | String  | Rebalance Manager - can rebalance allocations |
-| `vault_fee_bps`                 | Integer | Management fee in basis points (25 = 0.25%)   |
-| `upgradable`                    | Boolean | Allow future contract upgrades                |
-| `name_symbol.name`              | String  | Vault display name                            |
-| `name_symbol.symbol`            | String  | Vault token symbol                            |
-| `assets[].address`              | String  | Asset contract address (C...)                 |
-| `assets[].strategies[].address` | String  | Strategy contract address (C...)              |
-| `assets[].strategies[].name`    | String  | Strategy identifier                           |
-| `assets[].strategies[].paused`  | Boolean | Strategy active status                        |
-
-### Create Your Vault
+### Create XLM Vault Request
 
 ```bash
 curl -X POST "https://api.defindex.io/factory/create-vault?network=testnet" \
@@ -339,193 +235,318 @@ curl -X POST "https://api.defindex.io/factory/create-vault?network=testnet" \
     \"vault_fee_bps\": 25,
     \"upgradable\": true,
     \"name_symbol\": {
-      \"name\": \"My Application Vault\",
-      \"symbol\": \"MYVAULT\"
+      \"name\": \"REDI XLM Vault\",
+      \"symbol\": \"REDIXLM\"
     },
     \"assets\": [
       {
-        \"address\": \"$USDC_CONTRACT_ADDRESS\",
+        \"address\": \"$XLM_CONTRACT_ADDRESS\",
         \"strategies\": [
           {
-            \"address\": \"$USDC_BLEND_STRATEGY\",
-            \"name\": \"USDC_blend_strategy\",
+            \"address\": \"$BLEND_STRATEGY\",
+            \"name\": \"XLM_blend_strategy\",
             \"paused\": false
           }
         ]
       }
     ]
-  }" | jq . > vault_creation_response.json
+  }" | jq . | tee vault_creation_response.json
 ```
 
-**Expected Response:**
-
-```json
-{
-  "simulation_result": "SUCCESS",
-  "xdr": "AAAAAgAAAADKbDkD5HzBCs/tVx/cS34Kd6ZLgcmaASC6k7EMY0kSCACjWukADfwDAAAABAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA..."
-}
-```
-
-**Extract XDR for signing:**
+### Extract XDR for Signing
 
 ```bash
-XDR=$(cat vault_creation_response.json | jq -r '.xdr')
-echo $XDR
+export XDR=$(cat vault_creation_response.json | jq -r '.xdr')
 ```
 
 ---
 
 ## 6. Transaction Signing & Submission
 
-The API returns **unsigned** XDR. You must sign with your private key and submit to Stellar network.
-
-### Install Stellar SDK
-
-```bash
-cd /tmp
-npm install @stellar/stellar-sdk 2>/dev/null || npm install @stellar/stellar-sdk
-```
-
 ### Create Signing Script
 
 ```bash
-cat > /tmp/sign_and_submit.mjs << 'EOF'
-import pkg from '@stellar/stellar-sdk';
-const { Keypair, Networks, Transaction } = pkg;
+cat > /tmp/sign_vault.mjs << 'EOF'
+import { Keypair, Networks, Transaction } from '@stellar/stellar-sdk';
 
 const secret = process.env.ADMIN_STELLAR_SECRET;
 const xdr = process.env.XDR;
 
 if (!secret || !xdr) {
-  console.error('Error: ADMIN_STELLAR_SECRET and XDR environment variables required');
+  console.error('Missing ADMIN_STELLAR_SECRET or XDR');
   process.exit(1);
 }
 
-try {
-  const keypair = Keypair.fromSecret(secret);
-  const tx = new Transaction(xdr, Networks.TESTNET);
+const keypair = Keypair.fromSecret(secret);
+const tx = new Transaction(xdr, Networks.TESTNET);
+tx.sign(keypair);
 
-  tx.sign(keypair);
+const signedXdr = tx.toEnvelope().toXDR('base64');
 
-  const signedXdr = tx.toEnvelope().toXDR('base64');
+const response = await fetch('https://horizon-testnet.stellar.org/transactions', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ tx: signedXdr })
+});
 
-  const response = await fetch('https://horizon-testnet.stellar.org/transactions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ tx: signedXdr })
-  });
+const result = await response.json();
+console.log(JSON.stringify(result, null, 2));
 
-  const result = await response.json();
-  console.log(JSON.stringify(result, null, 2));
-
-  if (result.successful) {
-    console.error('\n✅ Transaction successful!');
-    console.error(`Transaction Hash: ${result.hash}`);
-  } else {
-    console.error('\n❌ Transaction failed');
-    process.exit(1);
-  }
-} catch (error) {
-  console.error('Error:', error.message);
+if (result.successful) {
+  console.error(`\n✅ Transaction successful!`);
+  console.error(`Hash: ${result.hash}`);
+} else {
+  console.error('\n❌ Failed');
   process.exit(1);
 }
 EOF
 ```
 
-### Sign and Submit Transaction
+### Sign and Submit
 
 ```bash
 cd /tmp
-ADMIN_STELLAR_SECRET=$ADMIN_STELLAR_SECRET XDR=$XDR node sign_and_submit.mjs | tee transaction_result.json
+npm install @stellar/stellar-sdk 2>/dev/null
+
+ADMIN_STELLAR_SECRET=$ADMIN_STELLAR_SECRET XDR=$XDR node sign_vault.mjs | tee tx_result.json
 ```
 
-**Expected Success Output:**
+**Success Output:**
 
-```json
-{
-  "id": "7bb9f39a30fd45c746dad62cf205a34cfc3248355512f680af7dc5ca9d35b781",
-  "successful": true,
-  "hash": "7bb9f39a30fd45c746dad62cf205a34cfc3248355512f680af7dc5ca9d35b781",
-  "ledger": 1062124,
-  "created_at": "2026-02-17T06:15:28Z",
-  "fee_charged": "9308142"
-}
+```
+✅ Transaction successful!
+Hash: 00ffb4d9XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 ---
 
 ## 7. Vault Verification
 
-### Extract Vault Contract Address
-
-**Method 1: Stellar Expert (Recommended)**
-
-Visit: `https://stellar.expert/explorer/testnet/tx/{TRANSACTION_HASH}`
-
-Look for the contract invocation result:
-
-```
-GDFG…REKJ invoked contract CDSC…4A32 `create_defindex_vault(...)` → CAAY…64XP
-```
-
-The address after `→` is your vault contract ID.
-
-**Method 2: Horizon API**
+### Extract Vault Address from Stellar Expert
 
 ```bash
-TX_HASH="7bb9f39a30fd45c746dad62cf205a34cfc3248355512f680af7dc5ca9d35b781"
-
-curl "https://horizon-testnet.stellar.org/transactions/$TX_HASH/operations" \
-  | jq -r '.._embedded.records[0].contract_id' 2>/dev/null \
-  || echo "Check transaction manually at https://stellar.expert/explorer/testnet/tx/$TX_HASH"
+TX_HASH=$(cat tx_result.json | jq -r '.hash')
+echo "View transaction: https://stellar.expert/explorer/testnet/tx/$TX_HASH"
 ```
 
-### Save Vault Address
+**Look for the contract creation result. Example:**
 
-```bash
-VAULT_ADDRESS="CAAYE3PAJEPWRUQ7S2JGAUVKFB3SJLPTDRIGTPAJ5OP3UJIWBYJM64XP"
-
-echo "DEFINDEX_VAULT_ADDRESS=$VAULT_ADDRESS" >> .env
-source .env
+```
+GDFG…REKJ invoked contract CDSC…4A32 `create_defindex_vault(...)` → CDXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
-### Verify Vault Functionality
+**Save the vault address:**
 
 ```bash
-# Query vault information
+export DEFINDEX_VAULT_ADDRESS="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+echo "DEFINDEX_VAULT_ADDRESS=$DEFINDEX_VAULT_ADDRESS" >> .env
+```
+
+### Verify Vault Status
+
+```bash
 curl "https://api.defindex.io/vault/$DEFINDEX_VAULT_ADDRESS?network=testnet" \
-  -H "Authorization: Bearer $DEFINDEX_API_KEY" | jq .
+  -H "Authorization: Bearer $DEFINDEX_API_KEY" | jq '{name, symbol, assets: .assets[0].symbol, total: .totalManagedFunds[0].total_amount}'
 ```
 
-**Expected Response:**
+---
+
+## 8. Buffer Contract Integration
+
+### Why a Buffer Contract?
+
+The Buffer contract adds an application layer between users and the DeFindex vault, enabling:
+
+- Custom deposit/withdrawal logic
+- Protected vs. available share management
+- Cross-chain bridging support
+- Automatic rebalancing on first deposit
+
+### Integration with `contractimport!`
+
+**Problem:** Manually defining vault traits is error-prone and causes type mismatches.
+
+**Solution:** Use `contractimport!` to generate types directly from the deployed vault WASM.
+
+### Step 1: Download Vault WASM
+
+```bash
+cd ~/your-project/contracts/buffer
+
+stellar contract fetch \
+  --id $DEFINDEX_VAULT_ADDRESS \
+  --network testnet \
+  --rpc-url https://soroban-testnet.stellar.org:443 \
+  --out-file defindex_vault.wasm
+
+# Verify
+ls -lh defindex_vault.wasm
+```
+
+**File location:** Place in the same directory as `Cargo.toml`.
+
+```
+contracts/buffer/
+├── Cargo.toml
+├── defindex_vault.wasm  ← HERE
+└── src/
+    └── lib.rs
+```
+
+### Step 2: Import Vault in Buffer Contract
+
+**In `src/lib.rs`:**
+
+```rust
+#![no_std]
+
+use soroban_sdk::{contract, contractimpl, Address, Env, Vec, vec};
+
+// Import DeFindex vault contract
+mod vault_import {
+    soroban_sdk::contractimport!(file = "defindex_vault.wasm");
+}
+use vault_import::Client as DeFindexVaultClient;
+
+#[contract]
+pub struct BufferContract;
+
+#[contractimpl]
+impl BufferContract {
+    pub fn deposit(env: Env, user: Address, amount: i128) -> DepositResult {
+        let vault_client = DeFindexVaultClient::new(&env, &vault_address);
+
+        // Deposit to vault with automatic investment
+        let result = vault_client.deposit(
+            &vec![&env, amount],
+            &vec![&env, min_shares],
+            &user,
+            &true  // invest=true
+        );
+
+        let shares_minted = result.1;
+
+        // Check if first deposit (invested_amount == 0)
+        let funds_after = vault_client.fetch_total_managed_funds();
+        let invested = funds_after.get(0).unwrap().invested_amount;
+
+        // Force investment if idle funds detected
+        if invested == 0 {
+            let total_idle = funds_after.get(0).unwrap().idle_amount;
+
+            vault_client.rebalance(
+                &user,
+                &vec![&env, vault_import::Instruction::Invest(blend_strategy, total_idle)]
+            );
+        }
+
+        // ... rest of deposit logic
+    }
+}
+```
+
+### Step 3: Compile and Deploy Buffer
+
+```bash
+cd ~/your-project/contracts/buffer
+
+cargo build --target wasm32-unknown-unknown --release
+
+cd ~/your-project
+
+stellar contract deploy \
+  --wasm contracts/buffer/target/wasm32-unknown-unknown/release/buffer_contract.wasm \
+  --source-account $ADMIN_STELLAR_SECRET \
+  --network testnet \
+  --rpc-url https://soroban-testnet.stellar.org:443 \
+  --network-passphrase "Test SDF Network ; September 2015" \
+  -- \
+  --admin $ADMIN_STELLAR_ADDRESS \
+  --vault $DEFINDEX_VAULT_ADDRESS \
+  --asset $XLM_CONTRACT_ADDRESS \
+  --blend_strategy $BLEND_STRATEGY
+```
+
+**Save the Buffer contract ID:**
+
+```bash
+export BUFFER_CONTRACT_ID="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+echo "BUFFER_CONTRACT_ID=$BUFFER_CONTRACT_ID" >> .env
+```
+
+### Step 4: Test Deposit Flow
+
+```bash
+# Approve Buffer to spend XLM
+stellar contract invoke \
+  --id $XLM_CONTRACT_ADDRESS \
+  --source-account $ADMIN_STELLAR_SECRET \
+  --network testnet \
+  --rpc-url https://soroban-testnet.stellar.org:443 \
+  --network-passphrase "Test SDF Network ; September 2015" \
+  -- \
+  approve \
+  --from $ADMIN_STELLAR_ADDRESS \
+  --spender $BUFFER_CONTRACT_ID \
+  --amount 10000000000 \
+  --expiration_ledger 3110000
+
+# Deposit 100 XLM
+stellar contract invoke \
+  --id $BUFFER_CONTRACT_ID \
+  --source-account $ADMIN_STELLAR_SECRET \
+  --network testnet \
+  --rpc-url https://soroban-testnet.stellar.org:443 \
+  --network-passphrase "Test SDF Network ; September 2015" \
+  -- \
+  deposit \
+  --user $ADMIN_STELLAR_ADDRESS \
+  --amount 1000000000
+```
+
+### Step 5: Verify Investment
+
+```bash
+curl "https://api.defindex.io/vault/$DEFINDEX_VAULT_ADDRESS?network=testnet" \
+  -H "Authorization: Bearer $DEFINDEX_API_KEY" | jq '.totalManagedFunds[0]'
+```
+
+**Expected (funds invested):**
 
 ```json
 {
-  "name": "My Application Vault",
-  "symbol": "MYVAULT",
-  "assets": [
-    {
-      "address": "CAQCFVLOBK5GIULPNZRGATJJMIZL5BSP7X5YJVMGCPTUEPFM4AVSRCJU",
-      "symbol": "USDC",
-      "strategies": [...]
-    }
-  ],
-  "totalManagedFunds": [],
-  "totalSupply": "0"
+  "idle_amount": "0",
+  "invested_amount": "1000000000",
+  "total_amount": "1000000000"
 }
 ```
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
-### "Account not found" Error
+### Funds Remain Idle After Deposit
 
-**Symptom:** API returns account/vault not found despite correct address.
+**Symptom:** `idle_amount > 0`, `invested_amount = 0`
 
-**Cause:** Missing `?network=testnet` query parameter - API defaulted to mainnet.
+**Cause:** Using old Buffer contract without rebalance logic.
 
-**Solution:**
+**Solution:** Redeploy Buffer with latest code including automatic rebalance:
+
+```rust
+if invested == 0 && idle_amount > 0 {
+    vault_client.rebalance(
+        &user,
+        &vec![&env, vault_import::Instruction::Invest(strategy, idle_amount)]
+    );
+}
+```
+
+### "Account not found" API Error
+
+**Cause:** Missing `?network=testnet` parameter.
+
+**Solution:** Always include network parameter:
 
 ```bash
 # WRONG
@@ -535,113 +556,52 @@ curl "https://api.defindex.io/vault/$VAULT_ADDRESS"
 curl "https://api.defindex.io/vault/$VAULT_ADDRESS?network=testnet"
 ```
 
-### "Strategy does not support asset" Error
+### Type Mismatch Errors in Rust
 
-**Symptom:** `VaultErrors.StrategyDoesNotSupportAsset`
+**Symptom:** `Error(Object, UnexpectedSize)` or similar type errors.
 
-**Cause:** Asset contract address doesn't match strategy's supported asset.
+**Cause:** Manual trait definition doesn't match actual vault contract.
 
-**Solution:** Query existing vaults to find correct asset/strategy pairs:
+**Solution:** Use `contractimport!` as documented in Section 8.
 
-```bash
-curl "https://api.defindex.io/vault/discover?network=testnet" \
-  -H "Authorization: Bearer $DEFINDEX_API_KEY" | jq .
-```
+### Buffer Deployment Uses Wrong Contract ID
 
-### "Forbidden resource" Error
+**Symptom:** Deposits go to old buffer, rebalance doesn't execute.
 
-**Symptom:** 403 Forbidden or authentication failure.
-
-**Cause:** Invalid or expired API key.
-
-**Solution:** Regenerate API key:
+**Solution:** Always verify `$BUFFER_CONTRACT_ID` after each deployment:
 
 ```bash
-# Login to get fresh access token
-ACCESS_TOKEN=$(curl -s -X POST https://api.defindex.io/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"your@email.com","password":"YourPassword"}' \
-  | jq -r '.access_token')
+# Update .env with correct ID
+export BUFFER_CONTRACT_ID="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 
-# Generate new API key
-curl -X POST https://api.defindex.io/api-keys/generate \
-  -H "Authorization: Bearer $ACCESS_TOKEN" | jq .
-```
-
-### Transaction Submission Fails
-
-**Symptom:** `txBadAuth` or signature verification failure.
-
-**Cause:** XDR not properly signed before submission.
-
-**Solution:** Verify signing process:
-
-```bash
-# Ensure ADMIN_STELLAR_SECRET is set correctly
-echo ${ADMIN_STELLAR_SECRET:0:5}...  # Should start with 'S'
-
-# Re-run signing script
-ADMIN_STELLAR_SECRET=$ADMIN_STELLAR_SECRET XDR=$XDR node /tmp/sign_and_submit.mjs
-```
-
-### Vault Not Confirmed After Creation
-
-**Symptom:** Vault address extracted but queries fail.
-
-**Cause:** Blockchain hasn't finalized the transaction yet (~5-10 seconds).
-
-**Solution:** Poll with retry logic:
-
-```bash
-for i in {1..20}; do
-  echo "Attempt $i: Checking vault..."
-
-  RESULT=$(curl -s "https://api.defindex.io/vault/$DEFINDEX_VAULT_ADDRESS?network=testnet" \
-    -H "Authorization: Bearer $DEFINDEX_API_KEY")
-
-  if echo $RESULT | jq -e '.name' > /dev/null 2>&1; then
-    echo "✅ Vault confirmed!"
-    echo $RESULT | jq .
-    break
-  fi
-
-  sleep 3
-done
+# Verify it's set
+echo $BUFFER_CONTRACT_ID
 ```
 
 ---
 
 ## Summary
 
-You've successfully:
-
-✅ Authenticated with DeFindex API  
-✅ Discovered testnet assets and strategies  
-✅ Created a vault with USDC + Blend strategy  
-✅ Signed and submitted the vault creation transaction  
-✅ Verified vault deployment on testnet
-
-**Your vault is now ready to accept deposits and generate yield.**
+✅ Created XLM vault with Blend strategy  
+✅ Deployed Buffer contract with automatic rebalance  
+✅ Integrated vault using `contractimport!`  
+✅ Verified funds are invested and generating yield
 
 ### Key Addresses Reference
 
 ```bash
-# View all your configuration
-cat .env | grep -E "DEFINDEX|USDC"
+XLM_CONTRACT_ADDRESS=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+BLEND_STRATEGY=CDVLOSPJPQOTB6ZCWO5VSGTOLGMKTXSFWYTUP572GTPNOWX4F76X3HPM
+DEFINDEX_VAULT_ADDRESS=CDKXLXJOJ7YSLTMXQQRX6H3VRVYELWUMMS3HT2A65BUD2C7OGQ7Q6IWC
+BUFFER_CONTRACT_ID=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
-**Expected Output:**
-
-```
-DEFINDEX_API_KEY=sk_9b4f783d...
-DEFINDEX_VAULT_ADDRESS=CAAYE3PAJEPW...
-USDC_CONTRACT_ADDRESS=CAQCFVLOBK5G...
-```
+---
 
 ### Next Steps
 
 1. **Integrate vault into your application** - Use the vault contract ID to build deposit/withdraw flows
-2. **Test deposits** - Send USDC to the vault via your application
+2. **Test deposits** - Send XLM to the vault via your application
 3. **Monitor yield** - Track `totalManagedFunds` to see strategy performance
 4. **Scale to production** - Repeat process on mainnet with real assets
 

@@ -9,12 +9,13 @@
 
 1. [Prerequisites Verification](#1-prerequisites-verification)
 2. [Project Structure Setup](#2-project-structure-setup)
-3. [Contract Compilation](#3-contract-compilation)
-4. [System Dependencies Installation](#4-system-dependencies-installation)
-5. [Stellar CLI Installation](#5-stellar-cli-installation)
-6. [Contract Deployment](#6-contract-deployment)
-7. [Verification](#7-verification)
-8. [Troubleshooting](#8-troubleshooting)
+3. [DeFindex Vault Integration](#3-defindex-vault-integration)
+4. [Contract Compilation](#4-contract-compilation)
+5. [System Dependencies Installation](#5-system-dependencies-installation)
+6. [Stellar CLI Installation](#6-stellar-cli-installation)
+7. [Contract Deployment](#7-contract-deployment)
+8. [Verification](#8-verification)
+9. [Troubleshooting](#9-troubleshooting)
 
 ---
 
@@ -46,21 +47,37 @@ cd ~/your-project-root
 source .env
 
 # Verify all required variables are set
-echo "Admin Address: $ADMIN_STELLAR_ADDRESS"
+echo "Admin Address: ${ADMIN_STELLAR_ADDRESS:0:5}..."
 echo "Admin Secret: ${ADMIN_STELLAR_SECRET:0:5}..."
-echo "Vault Address: $DEFINDEX_VAULT_ADDRESS"
-echo "USDC Address: $USDC_CONTRACT_ADDRESS"
+echo "Vault Address: ${DEFINDEX_VAULT_ADDRESS:0:5}..."
+echo "XLM Address: ${XLM_CONTRACT_ADDRESS:0:5}..."
+echo "Blend Strategy: ${BLEND_STRATEGY:0:5}..."
 
-# All should show actual values, not empty
+# All should show values starting with expected prefixes
 ```
 
-**If any variables are missing, they must be in your `.env` file:**
+**Required `.env` configuration:**
 
 ```bash
-ADMIN_STELLAR_SECRET=SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-ADMIN_STELLAR_ADDRESS=GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-DEFINDEX_VAULT_ADDRESS=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-USDC_CONTRACT_ADDRESS=CAQCFVLOBK5GIULPNZRGATJJMIZL5BSP7X5YJVMGCPTUEPFM4AVSRCJU
+# Stellar Testnet Configuration
+STELLAR_NETWORK=testnet
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org:443
+STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
+
+# Admin Wallet (REPLACE WITH YOUR TESTNET ACCOUNT)
+ADMIN_STELLAR_SECRET=SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+ADMIN_STELLAR_ADDRESS=GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+# DeFindex Configuration (REPLACE WITH YOUR ACTUAL ADDRESSES)
+DEFINDEX_API_KEY=sk_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+DEFINDEX_VAULT_ADDRESS=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+# Testnet Asset Addresses (these are public, can be left as-is)
+XLM_CONTRACT_ADDRESS=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+BLEND_STRATEGY=CDVLOSPJPQOTB6ZCWO5VSGTOLGMKTXSFWYTUP572GTPNOWX4F76X3HPM
+
+# Buffer Contract (will be generated during deployment)
+BUFFER_CONTRACT_ID=
 ```
 
 ---
@@ -111,49 +128,6 @@ debug-assertions = true
 EOF
 ```
 
-### Add Contract Source Files
-
-**Main contract (lib.rs):**
-
-Place your complete Buffer contract code in `buffer/src/lib.rs`.
-
-**DeFindex client (defindex_vault.rs):**
-
-```bash
-cat > buffer/src/defindex_vault.rs << 'EOF'
-use soroban_sdk::{contractclient, contracttype, Address, Env, Vec};
-
-#[contractclient(name = "DeFindexVaultClient")]
-pub trait DeFindexVault {
-    fn deposit(
-        env: Env,
-        amounts_desired: Vec<i128>,
-        amounts_min: Vec<i128>,
-        from: Address,
-        invest: bool,
-    ) -> (Vec<i128>, i128, i128);
-
-    fn withdraw(
-        env: Env,
-        withdraw_shares: i128,
-        amounts_min: Vec<i128>,
-        from: Address,
-    ) -> Vec<i128>;
-
-    fn total_supply(env: Env) -> i128;
-
-    fn fetch_total_managed_funds(env: Env) -> Vec<AssetInvestmentAllocation>;
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct AssetInvestmentAllocation {
-    pub asset: Address,
-    pub total_amount: i128,
-}
-EOF
-```
-
 ### Verify Structure
 
 ```bash
@@ -164,23 +138,128 @@ ls -la
 # Should show: Cargo.toml, src/
 
 ls -la src/
-# Should show: lib.rs, defindex_vault.rs
+# Should show: lib.rs
 
 # Verify lib.rs is not empty
 wc -l src/lib.rs
-# Should show ~590-600 lines
+# Should show ~600-650 lines
 ```
 
 ---
 
-## 3. Contract Compilation
+## 3. DeFindex Vault Integration
+
+### Why Use `contractimport!`?
+
+Manual trait definitions cause type mismatches and runtime errors. The professional approach is to import the deployed vault WASM directly.
+
+### Step 1: Download Vault WASM
+
+```bash
+cd ~/your-project-root/contracts/soroban/buffer
+
+# Download the deployed vault WASM
+stellar contract fetch \
+  --id $DEFINDEX_VAULT_ADDRESS \
+  --network testnet \
+  --rpc-url https://soroban-testnet.stellar.org:443 \
+  --out-file defindex_vault.wasm
+
+# Verify download
+ls -lh defindex_vault.wasm
+# Expected: ~60-80KB file
+```
+
+**File location:** Must be in the same directory as `Cargo.toml`.
+
+```
+contracts/buffer/
+├── Cargo.toml
+├── defindex_vault.wasm  ← HERE
+└── src/
+    └── lib.rs
+```
+
+### Step 2: Import Vault in Contract
+
+**In `src/lib.rs` (beginning of file):**
+
+```rust
+#![no_std]
+#![allow(unused_variables)]
+
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, Env, Symbol, Vec, vec
+};
+
+// Import DeFindex vault contract types
+mod vault_import {
+    soroban_sdk::contractimport!(file = "defindex_vault.wasm");
+}
+use vault_import::Client as DeFindexVaultClient;
+
+// ... rest of your contract code
+```
+
+### Step 3: Use Vault Client in Deposit Function
+
+**Example usage:**
+
+```rust
+pub fn deposit(env: Env, user: Address, amount: i128) -> DepositResult {
+    // ... validation logic ...
+
+    let vault_client = DeFindexVaultClient::new(&env, &vault_address);
+
+    // Deposit with automatic investment
+    let result = vault_client.deposit(
+        &vec![&env, amount],
+        &vec![&env, min_shares],
+        &user,
+        &true  // invest=true
+    );
+
+    let shares_minted = result.1;
+
+    // Check if funds need manual rebalance (first deposit scenario)
+    let funds_after = vault_client.fetch_total_managed_funds();
+    let asset_allocation = funds_after.get(0).unwrap();
+
+    if asset_allocation.invested_amount == 0 && asset_allocation.idle_amount > 0 {
+        let blend_strategy: Address = env.storage().instance()
+            .get(&DataKey::BlendStrategy)
+            .unwrap_or_else(|| panic!("Blend strategy not configured"));
+
+        vault_client.rebalance(
+            &user,
+            &vec![&env, vault_import::Instruction::Invest(
+                blend_strategy,
+                asset_allocation.idle_amount
+            )]
+        );
+    }
+
+    // ... rest of deposit logic ...
+}
+```
+
+### Benefits of This Approach
+
+✅ **Type-safe** - Generated from actual deployed contract  
+✅ **Auto-updated** - Re-download WASM when vault upgrades  
+✅ **No manual maintenance** - Traits stay in sync automatically  
+✅ **Compile-time errors** - Catches incompatibilities before deploy
+
+---
+
+## 4. Contract Compilation
 
 ### Clean Build
 
 ```bash
 cd ~/your-project-root/contracts/soroban/buffer
 
-# Remove any previous builds
+# Remove previous builds
 cargo clean
 
 # Build for WASM
@@ -191,16 +270,8 @@ cargo build --target wasm32-unknown-unknown --release
 
 ```
    Compiling buffer-contract v0.1.0
-warning: trait `DeFindexVault` is never used
- --> src/defindex_vault.rs:4:11
-  |
-4 | pub trait DeFindexVault {
-  |           ^^^^^^^^^^^^^
-warning: `buffer-contract` (lib) generated 1 warning
     Finished `release` profile [optimized] target(s) in 30-40s
 ```
-
-**The warning is harmless - the trait is used by the `#[contractclient]` macro.**
 
 ### Verify WASM Output
 
@@ -208,17 +279,17 @@ warning: `buffer-contract` (lib) generated 1 warning
 ls -lh target/wasm32-unknown-unknown/release/buffer_contract.wasm
 ```
 
-**Expected:** File size between 15KB and 30KB
+**Expected:** File size between 18KB and 30KB
 
 ```
--rwxrwxr-x 2 user user 18K date time buffer_contract.wasm
+-rwxrwxr-x 2 user user 22K date time buffer_contract.wasm
 ```
+
+**Note:** 18-30KB is correct for optimized Soroban contracts.
 
 ---
 
-## 4. System Dependencies Installation
-
-Stellar CLI requires system libraries. Install them before proceeding.
+## 5. System Dependencies Installation
 
 ### Install Required Libraries
 
@@ -237,13 +308,11 @@ pkg-config --modversion dbus-1
 # Check libudev
 pkg-config --modversion libudev
 # Expected: version number (e.g., 255)
-
-# If either command fails, the library is not installed correctly
 ```
 
 ---
 
-## 5. Stellar CLI Installation
+## 6. Stellar CLI Installation
 
 ### Install Latest Stellar CLI
 
@@ -251,7 +320,7 @@ pkg-config --modversion libudev
 cargo install --locked stellar-cli --force
 ```
 
-**This will take 5-10 minutes.** Wait for completion without interruption.
+**This may take 5-10 minutes.**
 
 ### Verify Installation
 
@@ -261,8 +330,6 @@ stellar --version
 
 **Expected:** `stellar 25.x.x` or newer
 
-If you see version 21.x.x or older, the installation failed. Retry the cargo install command.
-
 ### Configure Testnet Network
 
 ```bash
@@ -271,22 +338,13 @@ stellar network add \
   --rpc-url https://soroban-testnet.stellar.org:443 \
   --network-passphrase "Test SDF Network ; September 2015"
 
-# Verify network was added
+# Verify
 stellar network ls
-```
-
-**Expected output should include:**
-
-```
-testnet
-local
-futurenet
-mainnet
 ```
 
 ---
 
-## 6. Contract Deployment
+## 7. Contract Deployment
 
 ### Navigate to Project Root
 
@@ -295,9 +353,7 @@ cd ~/your-project-root
 source .env
 ```
 
-### Deploy and Initialize Contract
-
-**This single command deploys the WASM and initializes the contract:**
+### Deploy Buffer Contract
 
 ```bash
 stellar contract deploy \
@@ -309,45 +365,41 @@ stellar contract deploy \
   -- \
   --admin $ADMIN_STELLAR_ADDRESS \
   --vault $DEFINDEX_VAULT_ADDRESS \
-  --asset $USDC_CONTRACT_ADDRESS
+  --asset $XLM_CONTRACT_ADDRESS \
+  --blend_strategy $BLEND_STRATEGY
 ```
 
-**Expected successful output:**
+**Expected output:**
 
 ```
 ℹ️  Simulating install transaction…
-ℹ️  Signing transaction: fe11bf08913052821be3c9fb98b4d7e9102dedc151639cb8227f89b86fa47268
+ℹ️  Signing transaction: abc123...
 🌎 Submitting install transaction…
-ℹ️  Using wasm hash c6ed33f7fa57f6b8c6d986baae1c9375a104658295277e02563dc4441fbe504d
+ℹ️  Using wasm hash ca1526170dc7843061a18b08d339b628c1a3822b4efe23d9b70ae623827db327
 ℹ️  Simulating deploy transaction…
-ℹ️  Transaction hash is 05d8e1441feac4fad7b3bfe7b985f66645ebd4eabd81e9394bdb3b89496a3c49
-🔗 https://stellar.expert/explorer/testnet/tx/05d8e1441feac4fad7b3bfe7b985f66645ebd4eabd81e9394bdb3b89496a3c49
-ℹ️  Signing transaction: 05d8e1441feac4fad7b3bfe7b985f66645ebd4eabd81e9394bdb3b89496a3c49
+ℹ️  Signing transaction: def456...
 🌎 Submitting deploy transaction…
-🔗 https://lab.stellar.org/r/testnet/contract/CCTLT56VQEOIUPNVYCNIN647LH7AJWAB766OPG27QLCVRBDEFYS6RD4X
 ✅ Deployed!
-CCTLT56VQEOIUPNVYCNIN647LH7AJWAB766OPG27QLCVRBDEFYS6RD4X
+CD2224H2SJ5JDVFJU7NNKPQDTA6OTNG5GZDIYQNEY6VHTSBWID6W6S4V
 ```
 
 ### Save Contract ID
 
 ```bash
-# Copy the contract ID from the output (the C... address at the end)
-# Example: CCTLT56VQEOIUPNVYCNIN647LH7AJWAB766OPG27QLCVRBDEFYS6RD4X
+# Copy the contract ID from output (last line starting with C...)
+export BUFFER_CONTRACT_ID="CD2224H2SJ5JDVFJU7NNKPQDTA6OTNG5GZDIYQNEY6VHTSBWID6W6S4V"
 
-# Add to .env file
-echo "BUFFER_CONTRACT_ID=YOUR_ACTUAL_CONTRACT_ID" >> .env
-
-# Reload environment
+# Add to .env
+echo "BUFFER_CONTRACT_ID=$BUFFER_CONTRACT_ID" >> .env
 source .env
 
-# Verify it was saved
+# Verify
 echo $BUFFER_CONTRACT_ID
 ```
 
 ---
 
-## 7. Verification
+## 8. Verification
 
 ### Test Contract Configuration
 
@@ -362,16 +414,33 @@ stellar contract invoke \
   get_config
 ```
 
-**Expected output:**
+**Expected:**
 
-```
-ℹ️  Simulation identified as read-only. Send by rerunning with `--send=yes`.
-{"min_deposit_interval":2,"slippage_tolerance_bps":"50"}
+```json
+{
+  "min_deposit_interval": 2,
+  "slippage_tolerance_bps": "50"
+}
 ```
 
-### Test Total Stats
+### Test Deposit Flow
 
 ```bash
+# Step 1: Approve Buffer to spend XLM
+stellar contract invoke \
+  --id $XLM_CONTRACT_ADDRESS \
+  --source-account $ADMIN_STELLAR_SECRET \
+  --network testnet \
+  --rpc-url https://soroban-testnet.stellar.org:443 \
+  --network-passphrase "Test SDF Network ; September 2015" \
+  -- \
+  approve \
+  --from $ADMIN_STELLAR_ADDRESS \
+  --spender $BUFFER_CONTRACT_ID \
+  --amount 10000000000 \
+  --expiration_ledger 3110000
+
+# Step 2: Deposit 100 XLM (1 billion stroops)
 stellar contract invoke \
   --id $BUFFER_CONTRACT_ID \
   --source-account $ADMIN_STELLAR_SECRET \
@@ -379,167 +448,114 @@ stellar contract invoke \
   --rpc-url https://soroban-testnet.stellar.org:443 \
   --network-passphrase "Test SDF Network ; September 2015" \
   -- \
-  get_total_stats
+  deposit \
+  --user $ADMIN_STELLAR_ADDRESS \
+  --amount 1000000000
 ```
 
-**Expected output:**
+**Expected:**
 
-```
-ℹ️  Simulation identified as read-only. Send by rerunning with `--send=yes`.
-{"total_available":"0","total_deposited":"0","total_protected":"0","unique_users":0}
+```json
+{
+  "amount_deposited": "1000000000",
+  "new_available_balance": "1000000000",
+  "shares_minted": "1000000000",
+  "timestamp": 1771524429
+}
 ```
 
-### Test Pause Status
+### Verify Funds are Invested
 
 ```bash
-stellar contract invoke \
-  --id $BUFFER_CONTRACT_ID \
-  --source-account $ADMIN_STELLAR_SECRET \
-  --network testnet \
-  --rpc-url https://soroban-testnet.stellar.org:443 \
-  --network-passphrase "Test SDF Network ; September 2015" \
-  -- \
-  is_paused
+curl "https://api.defindex.io/vault/$DEFINDEX_VAULT_ADDRESS?network=testnet" \
+  -H "Authorization: Bearer $DEFINDEX_API_KEY" \
+  | jq '.totalManagedFunds[0]'
 ```
 
-**Expected output:**
+**Expected (funds invested, not idle):**
 
-```
-ℹ️  Simulation identified as read-only. Send by rerunning with `--send=yes`.
-false
-```
-
-### Verify on Stellar Expert
-
-Visit your contract on Stellar Expert:
-
-```
-https://stellar.expert/explorer/testnet/contract/YOUR_CONTRACT_ID
+```json
+{
+  "asset": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  "idle_amount": "0",
+  "invested_amount": "1000000000",
+  "total_amount": "1000000000"
+}
 ```
 
-Replace `YOUR_CONTRACT_ID` with your actual contract ID.
+✅ **Success:** `idle_amount = 0` means funds are generating yield.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
-### Issue: "xdr value invalid"
+### Funds Remain Idle After Deposit
 
-**Cause:** Outdated stellar-cli or wrong SDK version in contract.
+**Symptom:** `idle_amount > 0`, `invested_amount = 0`
 
-**Solution:**
-
-```bash
-# Verify stellar-cli version
-stellar --version
-# Must be 25.x.x or newer
-
-# Verify SDK version in Cargo.toml
-grep soroban-sdk contracts/soroban/buffer/Cargo.toml
-# Must show: soroban-sdk = "22.0.0"
-
-# If wrong, update Cargo.toml and rebuild:
-cd contracts/soroban/buffer
-cargo clean
-cargo build --target wasm32-unknown-unknown --release
-```
-
-### Issue: "non-default constructor not supported"
-
-**Cause:** Contract compiled with SDK < 22.0.0
+**Cause:** Using wrong Buffer contract ID (old deployment without rebalance logic).
 
 **Solution:**
 
 ```bash
-cd contracts/soroban/buffer
+# Verify you're using the LATEST deployed contract
+echo $BUFFER_CONTRACT_ID
 
-# Update Cargo.toml to use soroban-sdk = "22.0.0"
-nano Cargo.toml
-# Change the version, save
-
-# Clean and rebuild
-cargo clean
-cargo build --target wasm32-unknown-unknown --release
-
-# Redeploy
-cd ~/your-project-root
+# If unsure, redeploy and update .env with new ID
 stellar contract deploy ...
 ```
 
-### Issue: "Missing required argument 'admin'"
+### "Account not found" API Error
 
-**Cause:** Constructor parameters not provided or incorrect syntax.
+**Cause:** Missing `?network=testnet` query parameter.
 
-**Solution:**
-
-Ensure you have the `--` separator followed by constructor arguments:
+**Solution:** Always include network in DeFindex API calls:
 
 ```bash
-stellar contract deploy \
-  --wasm ... \
-  --source-account ... \
-  --network testnet \
-  --rpc-url ... \
-  --network-passphrase "..." \
-  -- \
+# WRONG
+curl "https://api.defindex.io/vault/$VAULT_ADDRESS"
+
+# CORRECT
+curl "https://api.defindex.io/vault/$VAULT_ADDRESS?network=testnet"
+```
+
+### Type Mismatch / `Error(Object, UnexpectedSize)`
+
+**Cause:** Manual vault trait definition doesn't match deployed contract.
+
+**Solution:** Use `contractimport!` as documented in Section 3.
+
+### "Missing required argument 'blend_strategy'"
+
+**Cause:** Constructor signature changed to require `blend_strategy` parameter.
+
+**Solution:** Always provide all 4 parameters:
+
+```bash
+-- \
   --admin $ADMIN_STELLAR_ADDRESS \
   --vault $DEFINDEX_VAULT_ADDRESS \
-  --asset $USDC_CONTRACT_ADDRESS
+  --asset $XLM_CONTRACT_ADDRESS \
+  --blend_strategy $BLEND_STRATEGY  # ← Required
 ```
 
-The `--` is critical - it separates CLI args from contract constructor args.
+### Contract ID Not Updating in .env
 
-### Issue: "failed to compile libdbus-sys" or "libudev"
-
-**Cause:** Missing system dependencies.
+**Symptom:** `echo $BUFFER_CONTRACT_ID` shows old ID after deployment.
 
 **Solution:**
 
 ```bash
-sudo apt update
-sudo apt install -y libdbus-1-dev libudev-dev pkg-config build-essential
+# Manually edit .env
+nano .env
 
-# Verify installation
-pkg-config --modversion dbus-1
-pkg-config --modversion libudev
+# Find line: BUFFER_CONTRACT_ID=COLD...
+# Replace with: BUFFER_CONTRACT_ID=CNEW...
+# Save (Ctrl+X, Y, Enter)
 
-# Retry stellar-cli installation
-cargo install --locked stellar-cli --force
-```
-
-### Issue: Contract Compiles but is Only 18KB
-
-**This is NORMAL.** Soroban contracts are highly optimized:
-
-- 15-30KB is typical for well-optimized contracts
-- The `opt-level = "z"` setting in Cargo.toml aggressively reduces size
-- `lto = true` performs link-time optimization
-- `strip = "symbols"` removes debug information
-
-**Do NOT worry if your WASM is 18-25KB - this is correct.**
-
-### Issue: Environment Variables Not Set
-
-**Symptom:** Commands fail with "empty variable" errors.
-
-**Solution:**
-
-```bash
-# Verify .env file exists
-cat .env
-
-# Must contain:
-ADMIN_STELLAR_SECRET=S...
-ADMIN_STELLAR_ADDRESS=G...
-DEFINDEX_VAULT_ADDRESS=C...
-USDC_CONTRACT_ADDRESS=C...
-
-# Reload environment
+# Reload
 source .env
-
-# Verify variables loaded
-echo $ADMIN_STELLAR_ADDRESS
-# Should show your G... address
+echo $BUFFER_CONTRACT_ID  # Should show new ID
 ```
 
 ---
@@ -549,25 +565,25 @@ echo $ADMIN_STELLAR_ADDRESS
 **Successful deployment checklist:**
 
 ✅ Rust and WASM toolchain installed  
-✅ Buffer contract compiled (18-25KB WASM)  
-✅ System dependencies installed (libdbus, libudev)  
+✅ DeFindex vault WASM downloaded  
+✅ Buffer contract compiled with `contractimport!`  
+✅ System dependencies installed  
 ✅ Stellar CLI v25.x.x installed  
-✅ Contract deployed to testnet  
-✅ Contract initialized with admin, vault, and USDC  
-✅ Configuration verified via `get_config`  
-✅ Contract ID saved to `.env`
+✅ Contract deployed with vault integration  
+✅ Deposit tested successfully  
+✅ Funds invested and generating yield (XLM)
 
-**Your Buffer contract is now live on testnet and ready for integration.**
+**Your Buffer contract is live on testnet with automatic investment.**
 
 ---
 
 ## Next Steps
 
-1. **Obtain testnet USDC** - Get USDC from Soroswap testnet faucet
-2. **Test deposit flow** - Manually deposit USDC to verify vault integration
-3. **Implement backend** - Build API endpoints for deposits/withdrawals
-4. **Integrate Crossmint** - Add user wallet management
-5. **Build UI** - Create user interface for deposits and yield tracking
+1. **Backend Integration** - Build API endpoints wrapping contract calls
+2. **User Wallet Management** - Integrate Crossmint or similar
+3. **Frontend Development** - Create deposit/withdrawal UI
+4. **Yield Tracking** - Display real-time APY from vault
+5. **Production Deployment** - Repeat process on mainnet
 
 ---
 

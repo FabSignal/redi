@@ -1,0 +1,10 @@
+{
+  "message": [
+    "assets.0.address should not be empty",
+    "assets.0.Address must be a valid Stellar address",
+    "caller should not be empty",
+    "Address must be a valid Stellar address"
+  ],
+  "error": "Bad Request",
+  "statusCode": 400
+}

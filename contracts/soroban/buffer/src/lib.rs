@@ -1,3 +1,4 @@
+// v3
 #![no_std]
 #![allow(unused_variables)] 
 
@@ -5,8 +6,10 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Env, Symbol, Vec, vec
 };
 
-mod defindex_vault;
-use defindex_vault::DeFindexVaultClient;
+mod vault_import {
+    soroban_sdk::contractimport!(file = "defindex_vault.wasm");
+}
+use vault_import::Client as DeFindexVaultClient;
 
 const MIN_AMOUNT: i128 = 1;
 const DEFAULT_SLIPPAGE_BPS: i128 = 50;
@@ -67,6 +70,7 @@ pub enum DataKey {
     Config,
     Balance(Address),
     TotalStats,
+    BlendStrategy,
 }
 
 #[contracttype]
@@ -83,17 +87,19 @@ pub struct BufferContract;
 
 #[contractimpl]
 impl BufferContract {
-    pub fn __constructor(env: Env, admin: Address, vault: Address, asset: Address) {
+    pub fn __constructor(env: Env, admin: Address, vault: Address, asset: Address, blend_strategy: Address) {
         admin.require_auth();
         
         Self::validate_non_zero_address(&env, &admin);
         Self::validate_non_zero_address(&env, &vault);
         Self::validate_non_zero_address(&env, &asset);
+        Self::validate_non_zero_address(&env, &blend_strategy);
         
         let storage = env.storage().instance();
         storage.set(&DataKey::Admin, &admin);
         storage.set(&DataKey::Vault, &vault);
         storage.set(&DataKey::Asset, &asset);
+        storage.set(&DataKey::BlendStrategy, &blend_strategy);
         storage.set(&DataKey::Paused, &false);
         storage.set(&DataKey::Config, &ContractConfig {
             min_deposit_interval: DEFAULT_MIN_INTERVAL_SECS,
@@ -109,7 +115,7 @@ impl BufferContract {
         
         env.events().publish(
             (Symbol::new(&env, "initialized"),),
-            (admin.clone(), vault, asset)
+            (admin.clone(), vault, asset, blend_strategy)
         );
     }
 
@@ -196,25 +202,44 @@ impl BufferContract {
             }
         }
         
-        let (total_managed, total_shares) = Self::vault_totals(env.clone());
+        let (total_managed_before, total_shares) = Self::vault_totals(env.clone());
         
-        let expected_shares = if total_shares == 0 || total_managed == 0 {
+        let expected_shares = if total_shares == 0 || total_managed_before == 0 {
             amount
         } else {
-            mul_div_ceil(&env, amount, total_shares, total_managed)
+            mul_div_ceil(&env, amount, total_shares, total_managed_before)
         };
         
         let slippage_amount = mul_div(&env, expected_shares, config.slippage_tolerance_bps, BPS_DIVISOR);
         let min_shares_out = checked_sub(&env, expected_shares, slippage_amount);
-        
+
         let vault_client = DeFindexVaultClient::new(&env, &vault);
-        let (_, actual_shares, _) = vault_client.deposit(
+
+        let result = vault_client.deposit(
             &vec![&env, amount],
             &vec![&env, min_shares_out],
             &user,
             &true
         );
+
+        let actual_shares: i128 = result.1;
+
+        let funds_after_deposit = vault_client.fetch_total_managed_funds();
+        let asset_allocation = funds_after_deposit.get(0).unwrap();
         
+        if asset_allocation.invested_amount == 0 && asset_allocation.idle_amount > 0 {
+            let blend_strategy: Address = env.storage().instance()
+                .get(&DataKey::BlendStrategy)
+                .unwrap_or_else(|| panic!("Blend strategy not configured"));
+            
+            let total_idle = asset_allocation.idle_amount;
+            
+            vault_client.rebalance(
+                &user,
+                &vec![&env, vault_import::Instruction::Invest(blend_strategy, total_idle)]
+            );
+        }
+
         if actual_shares <= 0 {
             panic!("Invalid vault response");
         }
