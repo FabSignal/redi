@@ -4,7 +4,6 @@ import { BufferService } from "./buffer.service.js";
 import { SupabaseService } from "../supabase/supabase.service.js";
 import { CrossmintService } from "../crossmint/crossmint.service.js";
 
-// Esquemas de validación de entrada
 const getBalanceSchema = z.object({
   userId: z.string().uuid(),
 });
@@ -19,6 +18,13 @@ const withdrawSchema = z.object({
   sharesAmount: z.string().regex(/^\d+$/, "Must be a numeric string"),
 });
 
+const submitSchema = z.object({
+  userId: z.string().uuid(),
+  email: z.string().email(),
+  transactionXDR: z.string().min(1),
+  txId: z.string().uuid(),
+});
+
 export class BufferController {
   constructor(
     private readonly bufferService: BufferService,
@@ -26,7 +32,6 @@ export class BufferController {
     private readonly crossmintService: CrossmintService,
   ) {}
 
-  // GET /api/buffer/balance
   async getBalance(req: Request, res: Response): Promise<void> {
     try {
       const { userId } = getBalanceSchema.parse(req.body);
@@ -49,8 +54,6 @@ export class BufferController {
     }
   }
 
-  // POST /api/buffer/deposit/prepare
-  // Construye el XDR sin firmarlo — Crossmint lo firma por el usuario
   async prepareDeposit(req: Request, res: Response): Promise<void> {
     try {
       const { userId, amountStroops } = depositSchema.parse(req.body);
@@ -66,7 +69,6 @@ export class BufferController {
         amountStroops,
       );
 
-      // Registrar intento en ledger off-chain antes de firmar
       const txId = await this.supabaseService.createBufferTransaction({
         userId,
         transactionType: "DEPOSIT",
@@ -85,21 +87,12 @@ export class BufferController {
     }
   }
 
-  // POST /api/buffer/deposit/submit
-  // Recibe el XDR preparado, Crossmint lo firma y lo submite
   async submitDeposit(req: Request, res: Response): Promise<void> {
     try {
-      const schema = z.object({
-        userId: z.string().uuid(),
-        walletId: z.string().min(1),
-        transactionXDR: z.string().min(1),
-        txId: z.string().uuid(),
-      });
-
-      const { userId, walletId, transactionXDR, txId } = schema.parse(req.body);
+      const { userId, email, transactionXDR, txId } = submitSchema.parse(req.body);
 
       const result = await this.crossmintService.signAndSubmitTransaction({
-        walletId,
+        email,
         transactionXDR,
       });
 
@@ -120,7 +113,6 @@ export class BufferController {
     }
   }
 
-  // POST /api/buffer/withdraw/prepare
   async prepareWithdraw(req: Request, res: Response): Promise<void> {
     try {
       const { userId, sharesAmount } = withdrawSchema.parse(req.body);
@@ -154,20 +146,12 @@ export class BufferController {
     }
   }
 
-  // POST /api/buffer/withdraw/submit
   async submitWithdraw(req: Request, res: Response): Promise<void> {
     try {
-      const schema = z.object({
-        userId: z.string().uuid(),
-        walletId: z.string().min(1),
-        transactionXDR: z.string().min(1),
-        txId: z.string().uuid(),
-      });
-
-      const { userId, walletId, transactionXDR, txId } = schema.parse(req.body);
+      const { userId, email, transactionXDR, txId } = submitSchema.parse(req.body);
 
       const result = await this.crossmintService.signAndSubmitTransaction({
-        walletId,
+        email,
         transactionXDR,
       });
 
