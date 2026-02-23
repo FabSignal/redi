@@ -214,9 +214,6 @@ importers:
       '@redi/config':
         specifier: workspace:^
         version: link:../../packages/config
-      '@redi/crossmint':
-        specifier: workspace:^
-        version: link:../../packages/crossmint
       '@stellar/stellar-sdk':
         specifier: ^14.5.0
         version: 14.5.0

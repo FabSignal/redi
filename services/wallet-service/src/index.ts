@@ -32,7 +32,7 @@ const crossmintService = new CrossmintService();
 const defindexService = new DeFindexService();
 const bufferService = new BufferService();
 const onboardingService = new OnboardingService(supabaseService, crossmintService, defindexService);
-const bufferController = new BufferController(bufferService, supabaseService, crossmintService);
+const bufferController = new BufferController(bufferService, supabaseService);
 const onboardingController = new OnboardingController(onboardingService, supabaseService);
 
 const env = getServerEnv();
@@ -41,7 +41,19 @@ const app = express();
 app.use(helmet());
 app.use(cors({ origin: "http://localhost:3000", credentials: false }));
 app.use(express.json({ limit: "1mb" }));
-app.use(pinoHttp());
+app.use(
+  pinoHttp({
+    redact: {
+      paths: [
+        "req.headers.authorization",
+        "req.headers.cookie",
+        "req.headers.x-api-key",
+        "res.headers.set-cookie",
+      ],
+      censor: "[REDACTED]",
+    },
+  }),
+);
 
 app.get("/health", (_req, res) => {
   res.json({

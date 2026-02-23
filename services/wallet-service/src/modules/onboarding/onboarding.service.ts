@@ -1,28 +1,30 @@
-import { rpc, Keypair, Networks, Transaction, xdr, StrKey } from "@stellar/stellar-sdk";
+import { rpc } from "@stellar/stellar-sdk";
 import { SupabaseService } from "../supabase/supabase.service.js";
 import { CrossmintService } from "../crossmint/crossmint.service.js";
 import { DeFindexService } from "../defindex/defindex.service.js";
 
 export interface OnboardingResult {
   userId: string;
-  stellarAddress: string;
-  vaultAddress: string;
+  stellarAddress: string | null;
+  vaultAddress: string | null;
   status: string;
 }
 
-interface HorizonTransactionResponse {
-  successful: boolean;
-  hash: string;
-  result_xdr: string;
-  extras?: {
-    result_codes?: Record<string, unknown>;
-  };
+export interface PrepareVaultResult {
+  txId: string;
+  transactionXDR: string;
+  walletAddress: string;
+  predictedVaultAddress: string | null;
+}
+
+export interface SubmitVaultResult {
+  txId: string;
+  transactionHash: string;
+  vaultAddress: string;
+  status: "READY";
 }
 
 export class OnboardingService {
-  private readonly adminKeypair: Keypair;
-  private readonly networkPassphrase: string;
-  private readonly horizonUrl: string;
   private readonly sorobanRpc: rpc.Server;
 
   constructor(
@@ -30,18 +32,7 @@ export class OnboardingService {
     private readonly crossmint: CrossmintService,
     private readonly defindex: DeFindexService,
   ) {
-    const adminSecret = process.env.ADMIN_STELLAR_SECRET;
     const network = process.env.STELLAR_NETWORK ?? "testnet";
-
-    if (!adminSecret) {
-      throw new Error("[OnboardingService] Required env var: ADMIN_STELLAR_SECRET");
-    }
-
-    this.adminKeypair = Keypair.fromSecret(adminSecret);
-    this.networkPassphrase = network === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
-    this.horizonUrl =
-      network === "mainnet" ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org";
-
     const rpcUrl =
       process.env.STELLAR_SOROBAN_RPC_URL ??
       (network === "mainnet"
@@ -60,8 +51,8 @@ export class OnboardingService {
         console.info(`[OnboardingService] User ${userId} already onboarded`);
         return {
           userId,
-          stellarAddress: user.stellar_address as string,
-          vaultAddress: user.defindex_vault_address as string,
+          stellarAddress: (user.stellar_address as string | null) ?? null,
+          vaultAddress: (user.defindex_vault_address as string | null) ?? null,
           status: "READY",
         };
       }
@@ -71,31 +62,138 @@ export class OnboardingService {
       }
 
       const userWithWallet = await this.supabase.getUser(userId);
+      const hasVault =
+        typeof userWithWallet.defindex_vault_address === "string" &&
+        userWithWallet.defindex_vault_address.length > 0;
 
-      if (!userWithWallet.defindex_vault_address) {
-        await this.createVault(userId, userWithWallet.stellar_address as string);
+      if (!hasVault) {
+        const currentStatus =
+          typeof userWithWallet.buffer_onboarding_status === "string" &&
+          userWithWallet.buffer_onboarding_status.length > 0
+            ? userWithWallet.buffer_onboarding_status
+            : "WALLET_CREATED";
+        if (currentStatus === "NOT_STARTED" || currentStatus === "PENDING") {
+          await this.supabase.updateUserOnboardingStatus(userId, "WALLET_CREATED");
+        }
       }
 
       const finalUser = await this.supabase.getUser(userId);
 
-      console.info(`[OnboardingService] Onboarding complete for user ${userId}`);
-
       return {
         userId,
-        stellarAddress: finalUser.stellar_address as string,
-        vaultAddress: finalUser.defindex_vault_address as string,
-        status: finalUser.buffer_onboarding_status as string,
+        stellarAddress: (finalUser.stellar_address as string | null) ?? null,
+        vaultAddress: (finalUser.defindex_vault_address as string | null) ?? null,
+        status:
+          typeof finalUser.buffer_onboarding_status === "string" &&
+          finalUser.buffer_onboarding_status.length > 0
+            ? finalUser.buffer_onboarding_status
+            : "WALLET_CREATED",
       };
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.error(`[OnboardingService] Onboarding failed for user ${userId}: ${message}`);
       try {
         await this.supabase.updateUserOnboardingStatus(userId, "FAILED");
-      } catch {
-        // ignore status update failure
-      }
+      } catch {}
       throw error;
     }
+  }
+
+  async prepareVaultCreation(userId: string): Promise<PrepareVaultResult> {
+    const user = await this.supabase.getUser(userId);
+    const stellarAddress =
+      typeof user.stellar_address === "string" && user.stellar_address.length > 0
+        ? user.stellar_address
+        : null;
+
+    if (!stellarAddress) {
+      throw new Error("[OnboardingService] User has no wallet address. Complete wallet provisioning first.");
+    }
+
+    if (
+      typeof user.defindex_vault_address === "string" &&
+      user.defindex_vault_address.length > 0 &&
+      user.buffer_onboarding_status === "READY"
+    ) {
+      throw new Error("[OnboardingService] User already has an active vault.");
+    }
+
+    await this.supabase.updateUserOnboardingStatus(userId, "VAULT_PREPARING");
+
+    const vaultResponse = await this.defindex.createVaultForUser({
+      userAddress: stellarAddress,
+      assetAddress: process.env.XLM_CONTRACT_ADDRESS,
+      strategyAddress: process.env.XLM_BLEND_STRATEGY,
+    });
+
+    const txId = await this.supabase.createBufferTransaction({
+      userId,
+      transactionType: "LOCK",
+      status: "PENDING",
+      metadata: {
+        operation: "VAULT_CREATE",
+        predictedVaultAddress: vaultResponse.predictedVaultAddress ?? null,
+      },
+    });
+
+    await this.supabase.updateUserOnboardingStatus(userId, "VAULT_PENDING_SIGNATURE");
+
+    return {
+      txId,
+      transactionXDR: vaultResponse.transactionXDR,
+      walletAddress: stellarAddress,
+      predictedVaultAddress: vaultResponse.predictedVaultAddress ?? null,
+    };
+  }
+
+  async submitVaultCreation(
+    userId: string,
+    txId: string,
+    transactionHash: string,
+  ): Promise<SubmitVaultResult> {
+    await this.supabase.confirmBufferTransactionForUser(userId, txId, transactionHash);
+    const record = await this.supabase.getBufferTransactionForUser(userId, txId);
+
+    const predictedVaultAddress =
+      record.metadata && typeof record.metadata.predictedVaultAddress === "string"
+        ? record.metadata.predictedVaultAddress
+        : null;
+
+    if (!predictedVaultAddress) {
+      throw new Error("[OnboardingService] Missing predicted vault address for submitted vault transaction.");
+    }
+
+    let rpcResult = await this.sorobanRpc.getTransaction(transactionHash);
+    for (
+      let i = 0;
+      i < 10 && rpcResult.status === rpc.Api.GetTransactionStatus.NOT_FOUND;
+      i++
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+      rpcResult = await this.sorobanRpc.getTransaction(transactionHash);
+    }
+
+    if (rpcResult.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+      throw new Error(`[OnboardingService] Vault submit RPC status: ${rpcResult.status}`);
+    }
+
+    const confirmed = await this.defindex.waitForVaultConfirmation(predictedVaultAddress);
+    if (!confirmed) {
+      throw new Error(
+        `[OnboardingService] Vault ${predictedVaultAddress} not confirmed by DeFindex API after polling`,
+      );
+    }
+
+    await this.supabase.updateUserOnboardingStatus(userId, "READY", {
+      defindex_vault_address: predictedVaultAddress,
+    });
+
+    return {
+      txId,
+      transactionHash,
+      vaultAddress: predictedVaultAddress,
+      status: "READY",
+    };
   }
 
   private async createWallet(userId: string, email: string): Promise<void> {
@@ -109,96 +207,5 @@ export class OnboardingService {
     });
 
     console.info(`[OnboardingService] Wallet created: ${wallet.address}`);
-  }
-
-  private async createVault(userId: string, stellarAddress: string): Promise<void> {
-    console.info(`[OnboardingService] [2/2] Creating DeFindex vault for user ${userId}`);
-
-    await this.supabase.updateUserOnboardingStatus(userId, "VAULT_CREATING");
-
-    const vaultResponse = await this.defindex.createVaultForUser({
-      userAddress: stellarAddress,
-      assetAddress: process.env.XLM_CONTRACT_ADDRESS,
-      strategyAddress: process.env.XLM_BLEND_STRATEGY,
-    });
-
-    const tx = new Transaction(vaultResponse.transactionXDR, this.networkPassphrase);
-    tx.sign(this.adminKeypair);
-    const signedXdr = tx.toEnvelope().toXDR("base64");
-
-    const response = await fetch(`${this.horizonUrl}/transactions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ tx: signedXdr }),
-    });
-
-    const result = (await response.json()) as HorizonTransactionResponse;
-
-    if (!result.successful) {
-      throw new Error(
-        `[OnboardingService] Vault tx failed: ${JSON.stringify(result.extras?.result_codes)}`,
-      );
-    }
-
-    console.info(`[OnboardingService] Vault tx confirmed: ${result.hash}`);
-
-    let rpcResult = await this.sorobanRpc.getTransaction(result.hash);
-    for (
-      let i = 0;
-      i < 10 && rpcResult.status === rpc.Api.GetTransactionStatus.NOT_FOUND;
-      i++
-    ) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
-      rpcResult = await this.sorobanRpc.getTransaction(result.hash);
-    }
-
-    if (rpcResult.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
-      throw new Error(`[OnboardingService] Vault tx RPC status: ${rpcResult.status}`);
-    }
-
-    const vaultAddress =
-      vaultResponse.predictedVaultAddress ?? this.extractVaultAddress(rpcResult.returnValue);
-
-    const confirmed = await this.defindex.waitForVaultConfirmation(vaultAddress);
-    if (!confirmed) {
-      throw new Error(
-        `[OnboardingService] Vault ${vaultAddress} not confirmed by DeFindex API after polling`,
-      );
-    }
-
-    await this.supabase.updateUserOnboardingStatus(userId, "READY", {
-      defindex_vault_address: vaultAddress,
-    });
-
-    console.info(`[OnboardingService] Vault persisted: ${vaultAddress}`);
-  }
-
-  private extractVaultAddress(returnValue: xdr.ScVal | undefined): string {
-    if (!returnValue) {
-      throw new Error("[OnboardingService] No return value in Soroban RPC response");
-    }
-
-    if (returnValue.switch().name !== "scvAddress") {
-      throw new Error(
-        `[OnboardingService] Unexpected return value type: ${returnValue.switch().name}`,
-      );
-    }
-
-    const scAddress = returnValue.address();
-
-    if (scAddress.switch().name !== "scAddressTypeContract") {
-      throw new Error(
-        `[OnboardingService] ScAddress is not a contract: ${scAddress.switch().name}`,
-      );
-    }
-
-    const vaultAddress = StrKey.encodeContract(scAddress.contractId() as unknown as Buffer);
-
-    if (!StrKey.isValidContract(vaultAddress)) {
-      throw new Error(`[OnboardingService] Extracted vault address is invalid: ${vaultAddress}`);
-    }
-
-    console.info(`[OnboardingService] Vault address extracted from meta XDR: ${vaultAddress}`);
-    return vaultAddress;
   }
 }

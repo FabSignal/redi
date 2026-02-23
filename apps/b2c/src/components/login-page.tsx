@@ -29,9 +29,9 @@ export function LoginPage() {
           JSON.stringify({ email, walletAddress, loginDate: new Date().toISOString() }),
         );
 
-        router.push("/wallet");
+        router.push("/dashboard");
       } catch {
-        setError("Unable to initialize wallet session");
+        setError("No pudimos inicializar tu sesión. Intenta nuevamente.");
         isProvisioning.current = false;
       }
     };
@@ -48,57 +48,54 @@ export function LoginPage() {
 
   if (authStatus === "logged-in") {
     return (
-      <main className="relative mx-auto grid min-h-[100svh] w-full place-items-center overflow-hidden px-4 py-10">
-        <div className="absolute inset-0 -z-10 opacity-70 [background:radial-gradient(circle_at_20%_20%,#bfdbfe_0,transparent_40%),radial-gradient(circle_at_85%_75%,#bbf7d0_0,transparent_35%)]" />
-        <section className="w-full max-w-md rounded-3xl border border-slate-200/80 bg-white/90 p-8 shadow-[0_24px_80px_-24px_rgba(15,23,42,0.32)] backdrop-blur-md">
-          <div className="space-y-4">
-            <div className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
-              Wallet bootstrap
+      <main className="min-h-svh bg-[#ffb48f] px-4 py-6 text-[#0D0D0D] md:py-10">
+        <div className="mx-auto w-full max-w-[430px] rounded-[42px] border-4 border-[#0D0D0D] bg-[#0D0D0D] p-2 shadow-[0_24px_90px_rgba(13,13,13,0.35)]">
+          <section className="min-h-[88svh] rounded-[34px] bg-[#f5e6cc] px-5 pb-6 pt-8">
+            <div className="rounded-3xl bg-[#FFFFFF] p-6">
+              <p className="inline-flex rounded-full bg-[#fccd04] px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-[#0D0D0D]">
+                REDI
+              </p>
+              <h1 className="mt-4 text-3xl font-black leading-none text-[#0D0D0D]">Inicializando</h1>
+              <p className="mt-3 text-sm font-semibold text-[#a64ac9]">Estamos preparando tu dashboard.</p>
+              <button
+                type="button"
+                onClick={() => void handleSignOut()}
+                className="mt-6 inline-flex h-11 items-center rounded-xl bg-[#a64ac9] px-4 text-sm font-black uppercase tracking-[0.08em] text-[#FFFFFF]"
+              >
+                Cerrar sesión
+              </button>
             </div>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-              Initializing wallet session
-            </h1>
-            <p className="text-sm text-slate-600">Please wait while we prepare your wallet.</p>
-            <button
-              type="button"
-              onClick={() => void handleSignOut()}
-              className="inline-flex w-fit items-center rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-            >
-              Sign out
-            </button>
-          </div>
-        </section>
+          </section>
+        </div>
       </main>
     );
   }
 
   return (
-    <main className="relative mx-auto grid min-h-[100svh] w-full place-items-center overflow-hidden px-4 py-10">
-      <div className="absolute inset-0 -z-10 opacity-70 [background:radial-gradient(circle_at_15%_18%,#bfdbfe_0,transparent_40%),radial-gradient(circle_at_88%_72%,#bbf7d0_0,transparent_36%)]" />
-      <div className="absolute -left-28 top-16 -z-10 h-72 w-72 rounded-full bg-sky-200/45 blur-3xl" />
-      <div className="absolute -right-24 bottom-10 -z-10 h-72 w-72 rounded-full bg-emerald-200/45 blur-3xl" />
-
-      <section className="w-full max-w-md rounded-3xl border border-slate-200/80 bg-white/90 p-8 shadow-[0_24px_80px_-24px_rgba(15,23,42,0.32)] backdrop-blur-md">
-        <div className="mb-6 space-y-3">
-          <div className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
-            Secure account access
+    <main className="min-h-svh bg-[#ffb48f] px-4 py-6 text-[#0D0D0D] md:py-10">
+      <div className="mx-auto w-full max-w-[430px] rounded-[42px] border-4 border-[#0D0D0D] bg-[#0D0D0D] p-2 shadow-[0_24px_90px_rgba(13,13,13,0.35)]">
+        <section className="min-h-[88svh] rounded-[34px] bg-[#f5e6cc] px-5 pb-6 pt-8">
+          <div className="rounded-3xl bg-[#FFFFFF] p-6">
+            <p className="inline-flex rounded-full bg-[#fccd04] px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-[#0D0D0D]">
+              REDI
+            </p>
+            <h1 className="mt-4 text-3xl font-black leading-none text-[#0D0D0D]">Bienvenida</h1>
+            <p className="mt-3 text-sm font-semibold text-[#a64ac9]">
+              Ingresa con tu correo para acceder a tu experiencia financiera.
+            </p>
           </div>
-          <h1 className="text-3xl font-semibold tracking-tight text-slate-900">Sign in to Redi</h1>
-          <p className="text-sm leading-relaxed text-slate-600">
-            Use your email to receive a one-time verification code and connect your wallet.
-          </p>
-        </div>
 
-        <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
-          <EmbeddedAuthForm />
-        </div>
+          <div className="mt-4 rounded-3xl border-2 border-[#17e9e0] bg-[#FFFFFF] p-4">
+            <EmbeddedAuthForm />
+          </div>
 
-        {error ? (
-          <p className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-            {error}
-          </p>
-        ) : null}
-      </section>
+          {error ? (
+            <p className="mt-4 rounded-2xl bg-[#a64ac9] px-4 py-3 text-sm font-semibold text-[#FFFFFF]">
+              {error}
+            </p>
+          ) : null}
+        </section>
+      </div>
     </main>
   );
 }

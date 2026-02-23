@@ -53,6 +53,8 @@ export function createBufferWalletRouter(
 
   router.post("/onboarding", (req, res) => onboardingController.onboard(req, res));
   router.post("/onboarding/status", (req, res) => onboardingController.getStatus(req, res));
+  router.post("/onboarding/vault/prepare", (req, res) => onboardingController.prepareVault(req, res));
+  router.post("/onboarding/vault/submit", (req, res) => onboardingController.submitVault(req, res));
 
   router.post("/balance", (req, res) => bufferController.getBalance(req, res));
 
