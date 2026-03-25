@@ -598,9 +598,10 @@ export default function DashboardPage() {
     router.replace("/");
   };
 
-  const totalShares = useMemo(() => {
+  const totalBalanceValue = useMemo(() => {
     if (!balance) return "0";
-    return (parseToBigInt(balance.availableShares) + parseToBigInt(balance.protectedShares)).toString();
+    if (balance.totalValue) return balance.totalValue;
+    return (parseToBigInt(balance.availableValue) + parseToBigInt(balance.protectedValue)).toString();
   }, [balance]);
 
   return (
@@ -649,17 +650,21 @@ export default function DashboardPage() {
             </article>
             <article className="rounded-2xl bg-[#a64ac9] p-3 text-[#FFFFFF]">
               <p className="text-[10px] font-bold uppercase tracking-[0.12em]">Disponibles</p>
-              <p className="mt-2 text-lg font-black">{balance ? stroopsToXlm(balance.availableShares) : "0"}</p>
+              <p className="mt-2 text-lg font-black">
+                {balance ? `${stroopsToXlm(balance.availableValue)} XLM` : "0 XLM"}
+              </p>
             </article>
             <article className="rounded-2xl bg-[#fccd04] p-3">
               <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#0D0D0D]">Protegidas</p>
               <p className="mt-2 text-lg font-black text-[#0D0D0D]">
-                {balance ? stroopsToXlm(balance.protectedShares) : "0"}
+                {balance ? `${stroopsToXlm(balance.protectedValue)} XLM` : "0 XLM"}
               </p>
             </article>
             <article className="rounded-2xl bg-[#ffb48f] p-3">
               <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#0D0D0D]">Totales</p>
-              <p className="mt-2 text-lg font-black text-[#0D0D0D]">{stroopsToXlm(totalShares)}</p>
+              <p className="mt-2 text-lg font-black text-[#0D0D0D]">
+                {`${stroopsToXlm(totalBalanceValue)} XLM`}
+              </p>
             </article>
           </section>
 

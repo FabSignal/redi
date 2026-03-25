@@ -13,8 +13,8 @@ dotenv.config({ path: path.resolve(__dirname, "../.env"), override: true });
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import { pinoHttp } from "pino-http";
 import { getServerEnv } from "@redi/config";
+import { appLogger, loggerMiddleware } from "./logger.js";
 
 import { SupabaseService } from "./modules/supabase/supabase.service.js";
 import { CrossmintService } from "./modules/crossmint/crossmint.service.js";
@@ -63,19 +63,7 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "1mb" }));
-app.use(
-  pinoHttp({
-    redact: {
-      paths: [
-        "req.headers.authorization",
-        "req.headers.cookie",
-        "req.headers.x-api-key",
-        "res.headers.set-cookie",
-      ],
-      censor: "[REDACTED]",
-    },
-  }),
-);
+app.use(loggerMiddleware);
 
 app.get("/health", (_req, res) => {
   res.json({
@@ -92,9 +80,12 @@ app.use("/api/buffer", stellarWalletRoutes);
 // job was running, those users are stuck in VAULT_CREATING with no job to finish them.
 // Mark them FAILED so they can retry via /vault/create.
 void supabaseService.failStuckVaultCreations().catch((err: unknown) => {
-  console.error("[startup] failStuckVaultCreations failed:", err);
+  appLogger.error({ err }, "startup.fail_stuck_vault_creations_failed");
 });
 
 app.listen(env.WALLET_SERVICE_PORT, () => {
-  process.stdout.write(`wallet-service listening on http://localhost:${env.WALLET_SERVICE_PORT}\n`);
+  appLogger.info(
+    { port: env.WALLET_SERVICE_PORT, service: "wallet-service" },
+    "wallet-service listening",
+  );
 });

@@ -16,11 +16,6 @@ const createVaultSchema = z.object({
   userId: z.string().uuid(),
 });
 
-// Accepts superset of old prepare/submit bodies — we only need userId
-const deprecatedVaultSchema = z.object({
-  userId: z.string().uuid(),
-});
-
 export class OnboardingController {
   constructor(
     private readonly onboardingService: OnboardingService,
@@ -126,92 +121,6 @@ export class OnboardingController {
       }
       const message = error instanceof Error ? error.message : "Unknown error";
       console.error(`[OnboardingController] createVault failed: ${message}`);
-      const resolved = this.resolveStatusFromMessage(message);
-      this.sendError(res, resolved.statusCode, resolved.errorCode, "Failed to start vault creation", {
-        reason: message,
-      });
-    }
-  }
-
-  /**
-   * @deprecated Use POST /onboarding/vault/create instead.
-   * Kept for backward compatibility until frontend migration is confirmed deployed.
-   * Behaves identically to createVault — returns 202 PROCESSING.
-   */
-  async prepareVault(req: Request, res: Response): Promise<void> {
-    console.warn(
-      "[OnboardingController] DEPRECATED: POST /onboarding/vault/prepare called. Migrate to POST /onboarding/vault/create.",
-    );
-    try {
-      const { userId } = deprecatedVaultSchema.parse(req.body);
-      const result = await this.onboardingService.startVaultCreation(userId);
-
-      void this.onboardingService.runVaultCreationBackground(userId, result.txId).catch(
-        async (err: unknown) => {
-          const error = err instanceof Error ? err : new Error(String(err));
-          console.error(
-            `[OnboardingController] (deprecated prepareVault) runVaultCreationBackground uncaught error: user=${userId} txId=${result.txId} err=${error.message}`,
-          );
-          await this.supabaseService
-            .updateUserOnboardingStatus(userId, "FAILED")
-            .catch(() => {});
-          await this.supabaseService
-            .updateBufferTransactionStatus(result.txId, "FAILED", { error: error.message })
-            .catch(() => {});
-        },
-      );
-
-      res.status(202).json(result);
-    } catch (error: unknown) {
-      if (error instanceof z.ZodError) {
-        this.sendError(res, 400, "INVALID_REQUEST", "Invalid request payload.", error.flatten());
-        return;
-      }
-      const message = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[OnboardingController] prepareVault (deprecated) failed: ${message}`);
-      const resolved = this.resolveStatusFromMessage(message);
-      this.sendError(res, resolved.statusCode, resolved.errorCode, "Failed to start vault creation", {
-        reason: message,
-      });
-    }
-  }
-
-  /**
-   * @deprecated Use POST /onboarding/vault/create instead.
-   * Kept for backward compatibility until frontend migration is confirmed deployed.
-   * Behaves identically to createVault — the transactionHash in the body is ignored.
-   */
-  async submitVault(req: Request, res: Response): Promise<void> {
-    console.warn(
-      "[OnboardingController] DEPRECATED: POST /onboarding/vault/submit called. Migrate to POST /onboarding/vault/create.",
-    );
-    try {
-      const { userId } = deprecatedVaultSchema.parse(req.body);
-      const result = await this.onboardingService.startVaultCreation(userId);
-
-      void this.onboardingService.runVaultCreationBackground(userId, result.txId).catch(
-        async (err: unknown) => {
-          const error = err instanceof Error ? err : new Error(String(err));
-          console.error(
-            `[OnboardingController] (deprecated submitVault) runVaultCreationBackground uncaught error: user=${userId} txId=${result.txId} err=${error.message}`,
-          );
-          await this.supabaseService
-            .updateUserOnboardingStatus(userId, "FAILED")
-            .catch(() => {});
-          await this.supabaseService
-            .updateBufferTransactionStatus(result.txId, "FAILED", { error: error.message })
-            .catch(() => {});
-        },
-      );
-
-      res.status(202).json(result);
-    } catch (error: unknown) {
-      if (error instanceof z.ZodError) {
-        this.sendError(res, 400, "INVALID_REQUEST", "Invalid request payload.", error.flatten());
-        return;
-      }
-      const message = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[OnboardingController] submitVault (deprecated) failed: ${message}`);
       const resolved = this.resolveStatusFromMessage(message);
       this.sendError(res, resolved.statusCode, resolved.errorCode, "Failed to start vault creation", {
         reason: message,

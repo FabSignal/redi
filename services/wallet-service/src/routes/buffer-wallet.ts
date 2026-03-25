@@ -56,9 +56,6 @@ export function createBufferWalletRouter(
   // GET alias: accidental GET calls should not 404. userId via query param.
   router.get("/onboarding/status", (req, res) => onboardingController.getStatus(req, res));
   router.post("/onboarding/vault/create", (req, res) => onboardingController.createVault(req, res));
-  // Deprecated: kept until frontend migration is confirmed deployed. Use /vault/create.
-  router.post("/onboarding/vault/prepare", (req, res) => onboardingController.prepareVault(req, res));
-  router.post("/onboarding/vault/submit", (req, res) => onboardingController.submitVault(req, res));
 
   router.post("/balance", (req, res) => bufferController.getBalance(req, res));
 

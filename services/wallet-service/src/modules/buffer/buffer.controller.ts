@@ -1,8 +1,10 @@
 import { type Request, type Response } from "express";
 import { z } from "zod";
+import { Networks, Transaction } from "@stellar/stellar-sdk";
 import { BufferService } from "./buffer.service.js";
 import { SupabaseService } from "../supabase/supabase.service.js";
 import { CrossmintService } from "../crossmint/crossmint.service.js";
+import { structuredLog } from "../../utils/structured-log.js";
 
 const getBalanceSchema = z.object({
   userId: z.string().uuid(),
@@ -63,6 +65,25 @@ export class BufferController {
     return userBufferContractAddress;
   }
 
+  private getNetworkPassphrase(): string {
+    return (process.env.STELLAR_NETWORK ?? "testnet") === "mainnet"
+      ? Networks.PUBLIC
+      : Networks.TESTNET;
+  }
+
+  private extractTransactionFeeStroops(transactionXDR: string): string | null {
+    try {
+      const tx = new Transaction(transactionXDR, this.getNetworkPassphrase());
+      return tx.fee;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveFeePayer(walletAddress: string): "platform" | "user" {
+    return walletAddress.startsWith("C") ? "platform" : "user";
+  }
+
   async getBalance(req: Request, res: Response): Promise<void> {
     try {
       const { userId } = getBalanceSchema.parse(req.body);
@@ -100,6 +121,21 @@ export class BufferController {
       }
 
       const balance = await this.bufferService.getBalance(bufferContractId, user.stellarAddress);
+      structuredLog.info("BufferController", "buffer.balance", {
+        userId,
+        walletAddress: user.stellarAddress,
+        bufferContractId,
+        balance: {
+          availableShares: balance.availableShares,
+          protectedShares: balance.protectedShares,
+          availableValueStroops: balance.availableValue,
+          protectedValueStroops: balance.protectedValue,
+          totalValueStroops: balance.totalValue,
+          totalDepositedStroops: balance.totalDeposited,
+          lastDepositTs: balance.lastDepositTs,
+          version: balance.version,
+        },
+      });
       res.json({ userId, balance });
     } catch (error: unknown) {
       if (error instanceof z.ZodError) {
@@ -107,7 +143,7 @@ export class BufferController {
         return;
       }
       const message = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[BufferController] getBalance failed: ${message}`);
+      structuredLog.error("BufferController", "buffer.balance_failed", { error: message });
       this.sendError(res, 500, "BALANCE_FETCH_FAILED", "Failed to get buffer balance");
     }
   }
@@ -115,7 +151,10 @@ export class BufferController {
   async prepareDeposit(req: Request, res: Response): Promise<void> {
     try {
       const { userId, amountStroops } = depositSchema.parse(req.body);
-      console.info(`[BufferController] prepareDeposit start: userId=${userId} amount=${amountStroops}`);
+      structuredLog.info("BufferController", "buffer.deposit_prepare_start", {
+        userId,
+        principalStroops: amountStroops,
+      });
       const user = await this.supabaseService.getUserBufferConfig(userId);
 
       if (!user.stellarAddress) {
@@ -154,6 +193,8 @@ export class BufferController {
         user.stellarAddress,
         amountStroops,
       );
+      const transactionFeeStroops = this.extractTransactionFeeStroops(transactionXDR);
+      const feePayer = this.resolveFeePayer(user.stellarAddress);
 
       const txId = await this.supabaseService.createBufferTransaction({
         userId,
@@ -185,7 +226,17 @@ export class BufferController {
         args: { user: user.stellarAddress, amount: amountStroops },
       });
 
-      console.info(`[BufferController] prepareDeposit success: userId=${userId} txId=${txId}`);
+      structuredLog.info("BufferController", "buffer.deposit_prepare_ready", {
+        userId,
+        txId,
+        walletAddress: user.stellarAddress,
+        bufferContractId,
+        principalStroops: amountStroops,
+        creditedToBufferStroops: amountStroops,
+        transactionFeeStroops,
+        transactionFeePayer: feePayer,
+        crossmintTransactionId: crossmintTransaction.transactionId,
+      });
       res.json({
         txId,
         transactionXDR,
@@ -201,7 +252,7 @@ export class BufferController {
         return;
       }
       const message = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[BufferController] prepareDeposit failed: ${message}`);
+      structuredLog.error("BufferController", "buffer.deposit_prepare_failed", { error: message });
       this.sendError(res, 500, "DEPOSIT_PREPARE_FAILED", "Failed to prepare deposit transaction");
     }
   }
@@ -224,12 +275,19 @@ export class BufferController {
         return;
       }
       const { userId, txId, transactionHash } = parsed.data;
-      console.info(`[BufferController] submitDeposit start: userId=${userId} txId=${txId}`);
+      structuredLog.info("BufferController", "buffer.deposit_submit_start", {
+        userId,
+        txId,
+      });
 
       try {
         const existing = await this.supabaseService.getBufferTransactionForUser(userId, txId);
         if (existing.status === "CONFIRMED") {
-          console.info(`[BufferController] submitDeposit idempotent hit: txId=${txId}`);
+          structuredLog.info("BufferController", "buffer.deposit_submit_idempotent", {
+            userId,
+            txId,
+            transactionHash: existing.stellarTxHash ?? transactionHash,
+          });
           res.json({ txId, transactionHash: existing.stellarTxHash ?? transactionHash, status: "CONFIRMED" });
           return;
         }
@@ -237,11 +295,15 @@ export class BufferController {
       }
 
       await this.supabaseService.confirmBufferTransactionForUser(userId, txId, transactionHash);
-      console.info(`[BufferController] submitDeposit success: txId=${txId} hash=${transactionHash}`);
+      structuredLog.info("BufferController", "buffer.deposit_submit_confirmed", {
+        userId,
+        txId,
+        transactionHash,
+      });
       res.json({ txId, transactionHash, status: "CONFIRMED" });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[BufferController] submitDeposit failed: ${message}`);
+      structuredLog.error("BufferController", "buffer.deposit_submit_failed", { error: message });
       this.sendError(res, 500, "DEPOSIT_CONFIRM_FAILED", "Failed to confirm deposit transaction");
     }
   }
@@ -249,7 +311,10 @@ export class BufferController {
   async prepareWithdraw(req: Request, res: Response): Promise<void> {
     try {
       const { userId, sharesAmount } = withdrawSchema.parse(req.body);
-      console.info(`[BufferController] prepareWithdraw start: userId=${userId} shares=${sharesAmount}`);
+      structuredLog.info("BufferController", "buffer.withdraw_prepare_start", {
+        userId,
+        requestedShares: sharesAmount,
+      });
       const user = await this.supabaseService.getUserBufferConfig(userId);
 
       if (!user.stellarAddress) {
@@ -288,6 +353,8 @@ export class BufferController {
         user.stellarAddress,
         sharesAmount,
       );
+      const transactionFeeStroops = this.extractTransactionFeeStroops(transactionXDR);
+      const feePayer = this.resolveFeePayer(user.stellarAddress);
 
       const txId = await this.supabaseService.createBufferTransaction({
         userId,
@@ -319,7 +386,16 @@ export class BufferController {
         args: { user: user.stellarAddress, shares: sharesAmount, to: user.stellarAddress },
       });
 
-      console.info(`[BufferController] prepareWithdraw success: userId=${userId} txId=${txId}`);
+      structuredLog.info("BufferController", "buffer.withdraw_prepare_ready", {
+        userId,
+        txId,
+        walletAddress: user.stellarAddress,
+        bufferContractId,
+        requestedShares: sharesAmount,
+        transactionFeeStroops,
+        transactionFeePayer: feePayer,
+        crossmintTransactionId: crossmintTransaction.transactionId,
+      });
       res.json({
         txId,
         transactionXDR,
@@ -335,7 +411,7 @@ export class BufferController {
         return;
       }
       const message = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[BufferController] prepareWithdraw failed: ${message}`);
+      structuredLog.error("BufferController", "buffer.withdraw_prepare_failed", { error: message });
       this.sendError(res, 500, "WITHDRAW_PREPARE_FAILED", "Failed to prepare withdraw transaction");
     }
   }
@@ -358,12 +434,19 @@ export class BufferController {
         return;
       }
       const { userId, txId, transactionHash } = parsed.data;
-      console.info(`[BufferController] submitWithdraw start: userId=${userId} txId=${txId}`);
+      structuredLog.info("BufferController", "buffer.withdraw_submit_start", {
+        userId,
+        txId,
+      });
 
       try {
         const existing = await this.supabaseService.getBufferTransactionForUser(userId, txId);
         if (existing.status === "CONFIRMED") {
-          console.info(`[BufferController] submitWithdraw idempotent hit: txId=${txId}`);
+          structuredLog.info("BufferController", "buffer.withdraw_submit_idempotent", {
+            userId,
+            txId,
+            transactionHash: existing.stellarTxHash ?? transactionHash,
+          });
           res.json({ txId, transactionHash: existing.stellarTxHash ?? transactionHash, status: "CONFIRMED" });
           return;
         }
@@ -371,11 +454,15 @@ export class BufferController {
       }
 
       await this.supabaseService.confirmBufferTransactionForUser(userId, txId, transactionHash);
-      console.info(`[BufferController] submitWithdraw success: txId=${txId} hash=${transactionHash}`);
+      structuredLog.info("BufferController", "buffer.withdraw_submit_confirmed", {
+        userId,
+        txId,
+        transactionHash,
+      });
       res.json({ txId, transactionHash, status: "CONFIRMED" });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[BufferController] submitWithdraw failed: ${message}`);
+      structuredLog.error("BufferController", "buffer.withdraw_submit_failed", { error: message });
       this.sendError(res, 500, "WITHDRAW_CONFIRM_FAILED", "Failed to confirm withdraw transaction");
     }
   }

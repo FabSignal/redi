@@ -346,8 +346,94 @@ echo "DEFINDEX_VAULT_ADDRESS=$DEFINDEX_VAULT_ADDRESS" >> .env
 
 ```bash
 curl "https://api.defindex.io/vault/$DEFINDEX_VAULT_ADDRESS?network=testnet" \
-  -H "Authorization: Bearer $DEFINDEX_API_KEY" | jq '{name, symbol, assets: .assets[0].symbol, total: .totalManagedFunds[0].total_amount}'
+  -H "Authorization: Bearer $DEFINDEX_API_KEY" | jq .
 ```
+
+**Expected response shape:**
+
+```json
+{
+  "name": "DeFindex-Vault-<VAULT_NAME>",
+  "symbol": "<VAULT_SYMBOL>",
+  "roles": {
+    "manager": "<MANAGER_ADDRESS>",
+    "emergencyManager": "<EMERGENCY_MANAGER_ADDRESS>",
+    "rebalanceManager": "<REBALANCE_MANAGER_ADDRESS>",
+    "feeReceiver": "<FEE_RECEIVER_ADDRESS>"
+  },
+  "assets": [
+    {
+      "address": "<ASSET_ADDRESS>",
+      "name": "<ASSET_NAME>",
+      "symbol": "<ASSET_SYMBOL>",
+      "strategies": [
+        {
+          "address": "<STRATEGY_ADDRESS>",
+          "name": "<STRATEGY_NAME>",
+          "paused": false
+        }
+      ]
+    }
+  ],
+  "totalManagedFunds": [
+    {
+      "asset": "<ASSET_ADDRESS>",
+      "idle_amount": "0",
+      "invested_amount": "1000000000",
+      "strategy_allocations": [
+        {
+          "amount": "1000000000",
+          "paused": false,
+          "strategy_address": "<STRATEGY_ADDRESS>"
+        }
+      ],
+      "total_amount": "1000000000"
+    }
+  ],
+  "feesBps": {
+    "vaultFee": 25,
+    "defindexFee": 2000
+  },
+  "apy": 8.55
+}
+```
+
+### Vault Status Response Reference
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Human-readable vault name. This corresponds to the vault name configured at creation time. |
+| `symbol` | Human-readable vault symbol configured at creation time. |
+| `roles.manager` | Primary vault manager. According to the vault contract and whitepaper, the manager is responsible for managing the vault and investing idle funds in strategies. |
+| `roles.emergencyManager` | Address with emergency authority. The emergency manager can rescue funds from a strategy into idle vault funds and can pause strategies in emergency conditions. |
+| `roles.rebalanceManager` | Address authorized to rebalance strategy allocations. In the factory tests, this is the role mapped to index `3` when the vault is created. |
+| `roles.feeReceiver` | Address that receives the vault-side performance fees when fees are distributed. |
+| `assets` | List of assets configured in the vault. The vault contract exposes assets as a vector of asset-and-strategy sets. |
+| `assets[].address` | Contract address of the underlying asset managed by the vault. |
+| `assets[].name` | Asset display name returned by the DeFindex API for this asset. |
+| `assets[].symbol` | Asset ticker or symbol returned by the DeFindex API. |
+| `assets[].strategies` | Strategies configured for this asset inside the vault. |
+| `assets[].strategies[].address` | Contract address of the strategy assigned to the asset. |
+| `assets[].strategies[].name` | Human-readable strategy name configured for the vault. |
+| `assets[].strategies[].paused` | Whether the strategy is currently paused. The vault contract exposes pause and unpause controls for strategies. |
+| `totalManagedFunds` | Per-asset allocation snapshot returned by the vault. The contract documentation defines this as the total managed funds, including both invested and idle funds. |
+| `totalManagedFunds[].asset` | Asset address for the allocation entry. This links the allocation row to one item in `assets`. |
+| `totalManagedFunds[].idle_amount` | Amount of the asset currently held idle inside the vault, not deployed into strategies. |
+| `totalManagedFunds[].invested_amount` | Amount of the asset currently deployed across one or more strategies. |
+| `totalManagedFunds[].strategy_allocations` | Per-strategy breakdown of the invested amount for that asset. |
+| `totalManagedFunds[].strategy_allocations[].amount` | Amount of the asset allocated to the specific strategy. |
+| `totalManagedFunds[].strategy_allocations[].paused` | Whether the referenced strategy is paused at the time of the snapshot. |
+| `totalManagedFunds[].strategy_allocations[].strategy_address` | Strategy contract address for the allocation entry. |
+| `totalManagedFunds[].total_amount` | Total units of the asset managed by the vault for that asset row. In the DeFindex whitepaper structure, this is the sum of idle and invested funds for that asset. |
+| `feesBps.vaultFee` | Vault performance fee in basis points. The whitepaper explains that vault fees are decided per vault and applied to strategy gains. |
+| `feesBps.defindexFee` | DeFindex protocol fee in basis points. This represents the protocol share of distributed performance fees. |
+| `apy` | Estimated annual percentage yield for the vault. DeFindex defines vault APY as the net yield depositors receive after vault fees are deducted, based on price-per-share growth. |
+
+**Notes:**
+
+- `feesBps` values are expressed in basis points: `100 bps = 1%`.
+- For a single-asset vault, `totalManagedFunds[0].total_amount` is the total balance of that asset currently managed by the vault.
+- `totalManagedFunds` is the most important block for operational verification because it shows whether funds are idle or already invested into strategies.
 
 ---
 
@@ -515,11 +601,26 @@ curl "https://api.defindex.io/vault/$DEFINDEX_VAULT_ADDRESS?network=testnet" \
 
 ```json
 {
+  "asset": "<ASSET_ADDRESS>",
   "idle_amount": "0",
   "invested_amount": "1000000000",
+  "strategy_allocations": [
+    {
+      "amount": "1000000000",
+      "paused": false,
+      "strategy_address": "<STRATEGY_ADDRESS>"
+    }
+  ],
   "total_amount": "1000000000"
 }
 ```
+
+Where:
+
+- `idle_amount` is the portion still sitting in the vault as idle funds.
+- `invested_amount` is the portion deployed into strategies.
+- `strategy_allocations` breaks `invested_amount` down by strategy.
+- `total_amount` is the sum of idle and invested funds for that asset.
 
 ---
 

@@ -2,6 +2,7 @@ import { SupabaseService } from "../supabase/supabase.service.js";
 import { CrossmintService } from "../crossmint/crossmint.service.js";
 import { DeFindexService } from "../defindex/defindex.service.js";
 import { BufferService } from "../buffer/buffer.service.js";
+import { structuredLog } from "../../utils/structured-log.js";
 
 export interface OnboardingResult {
   userId: string;
@@ -30,13 +31,24 @@ export class OnboardingService {
       const user = await this.supabase.upsertUser(userId, email);
 
       if (user.buffer_onboarding_status === "READY") {
-        console.info(`[OnboardingService] User ${userId} already onboarded`);
-        return {
+        const result = {
           userId,
           stellarAddress: (user.stellar_address as string | null) ?? null,
           vaultAddress: (user.defindex_vault_address as string | null) ?? null,
           status: "READY",
         };
+        structuredLog.info("OnboardingService", "onboarding.already_ready", result);
+        if (result.vaultAddress) {
+          void this.defindex
+            .logVaultInfo(result.vaultAddress, `onboardUser existing vault user=${userId}`)
+            .catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : String(error);
+              console.warn(
+                `[OnboardingService] Failed to log existing vault info for user=${userId} vault=${result.vaultAddress}: ${message}`,
+              );
+            });
+        }
+        return result;
       }
 
       if (!user.stellar_address) {
@@ -60,8 +72,7 @@ export class OnboardingService {
       }
 
       const finalUser = await this.supabase.getUser(userId);
-
-      return {
+      const result = {
         userId,
         stellarAddress: (finalUser.stellar_address as string | null) ?? null,
         vaultAddress: (finalUser.defindex_vault_address as string | null) ?? null,
@@ -71,6 +82,8 @@ export class OnboardingService {
             ? finalUser.buffer_onboarding_status
             : "WALLET_CREATED",
       };
+      structuredLog.info("OnboardingService", "onboarding.state", result);
+      return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.error(`[OnboardingService] Onboarding failed for user ${userId}: ${message}`);

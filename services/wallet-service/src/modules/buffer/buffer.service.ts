@@ -15,6 +15,9 @@ import { adminMutex } from "../../utils/admin-mutex.js";
 export interface BufferBalance {
   availableShares: string;
   protectedShares: string;
+  availableValue: string;
+  protectedValue: string;
+  totalValue: string;
   totalDeposited: string;
   lastDepositTs: number;
   version: number;
@@ -70,9 +73,33 @@ export class BufferService {
 
     const native = scValToNative(result);
 
+    const valuesTransaction = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(contract.call("get_values", Address.fromString(userAddress).toScVal()))
+      .setTimeout(30)
+      .build();
+
+    const valuesSimulation = await this.server.simulateTransaction(valuesTransaction);
+
+    if (rpc.Api.isSimulationError(valuesSimulation)) {
+      throw new Error(`[BufferService] getValues simulation failed: ${valuesSimulation.error}`);
+    }
+
+    const valuesResult = valuesSimulation.result?.retval;
+    if (!valuesResult) {
+      throw new Error("[BufferService] getValues: no result from simulation");
+    }
+
+    const valuesNative = scValToNative(valuesResult) as [bigint | number | string, bigint | number | string, bigint | number | string];
+
     return {
       availableShares: native.available_shares.toString(),
       protectedShares: native.protected_shares.toString(),
+      availableValue: valuesNative[0].toString(),
+      protectedValue: valuesNative[1].toString(),
+      totalValue: valuesNative[2].toString(),
       totalDeposited: native.total_deposited.toString(),
       lastDepositTs: Number(native.last_deposit_ts),
       version: Number(native.version),

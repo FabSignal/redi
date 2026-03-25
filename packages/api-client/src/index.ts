@@ -27,6 +27,9 @@ const onboardingSchema = z.object({
 const canonicalBufferBalanceSchema = z.object({
   availableShares: z.string(),
   protectedShares: z.string(),
+  availableValue: z.string(),
+  protectedValue: z.string(),
+  totalValue: z.string(),
   totalDeposited: z.string(),
   lastDepositTs: z.number(),
   version: z.number(),
@@ -37,7 +40,7 @@ const legacyBufferBalanceSchema = z.object({
   assets: z.string(),
 });
 
-type CanonicalBufferBalance = z.infer<typeof canonicalBufferBalanceSchema>;
+type CanonicalBufferBalance = z.output<typeof canonicalBufferBalanceSchema>;
 
 const normalizedBufferBalanceSchema: z.ZodType<CanonicalBufferBalance> = z
   .union([canonicalBufferBalanceSchema, legacyBufferBalanceSchema])
@@ -48,6 +51,9 @@ const normalizedBufferBalanceSchema: z.ZodType<CanonicalBufferBalance> = z
     return {
       availableShares: balance.shares,
       protectedShares: "0",
+      availableValue: balance.assets,
+      protectedValue: "0",
+      totalValue: balance.assets,
       totalDeposited: balance.assets,
       lastDepositTs: 0,
       version: 0,
