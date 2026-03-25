@@ -1,7 +1,3 @@
-**Correcto, está enfocado en USDC pero trabajaste con XLM. Aquí está la versión corregida y consistente:**
-
----
-
 # DeFindex Vault Creation Guide - XLM Implementation
 
 **Target Audience:** Developers integrating DeFindex XLM yield vaults into Stellar/Soroban applications  
