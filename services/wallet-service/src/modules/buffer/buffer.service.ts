@@ -3,12 +3,14 @@ import {
   Contract,
   Keypair,
   Networks,
+  Transaction,
   TransactionBuilder,
   BASE_FEE,
   scValToNative,
   nativeToScVal,
   rpc,
 } from "@stellar/stellar-sdk";
+import { adminMutex } from "../../utils/admin-mutex.js";
 
 export interface BufferBalance {
   availableShares: string;
@@ -138,5 +140,134 @@ export class BufferService {
 
     const prepared = await this.server.prepareTransaction(transaction);
     return prepared.toXDR();
+  }
+
+  async setUserVault(
+    bufferContractId: string,
+    userAddress: string,
+    vaultAddress: string,
+  ): Promise<string> {
+    if (!bufferContractId) {
+      throw new Error("[BufferService] Missing buffer contract id");
+    }
+    if (!userAddress || !vaultAddress) {
+      throw new Error("[BufferService] setUserVault requires userAddress and vaultAddress");
+    }
+
+    const contract = new Contract(bufferContractId);
+    const account = await this.server.getAccount(this.adminKeypair.publicKey());
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_user_vault",
+          Address.fromString(userAddress).toScVal(),
+          Address.fromString(vaultAddress).toScVal(),
+        ),
+      )
+      .setTimeout(300)
+      .build();
+
+    const prepared = await this.server.prepareTransaction(tx);
+
+    return adminMutex.run("setUserVault", async () => {
+      prepared.sign(this.adminKeypair);
+
+      const sendResult = await this.server.sendTransaction(prepared);
+      if (sendResult.status === "ERROR") {
+        throw new Error(
+          `[BufferService] setUserVault sendTransaction failed: ${sendResult.errorResult?.toXDR("base64") ?? "unknown error"}`,
+        );
+      }
+
+      if (!sendResult.hash || sendResult.hash.length === 0) {
+        throw new Error("[BufferService] setUserVault missing transaction hash");
+      }
+
+      await this.waitForTransactionSuccess(sendResult.hash, 15, 2_000);
+      return sendResult.hash;
+    });
+  }
+
+  /**
+   * Sign and submit a pre-built Soroban transaction XDR with the admin keypair.
+   *
+   * Use this for externally-prepared transactions (e.g. from DeFindex factory API)
+   * that already include resource fees and footprint. Do NOT call
+   * server.prepareTransaction() on DeFindex-returned XDRs — DeFindex has already
+   * called simulate on their end.
+   *
+   * The admin signing block is wrapped in adminMutex to prevent txBAD_SEQ when
+   * multiple admin transactions are attempted concurrently.
+   */
+  async createVaultFromXdr(
+    transactionXDR: string,
+  ): Promise<{ hash: string; vaultAddress: string | null }> {
+    return adminMutex.run("createVaultFromXdr", async () => {
+      const tx = new Transaction(transactionXDR, this.networkPassphrase);
+      tx.sign(this.adminKeypair);
+
+      const sendResult = await this.server.sendTransaction(tx);
+      if (sendResult.status === "ERROR") {
+        throw new Error(
+          `[BufferService] createVaultFromXdr sendTransaction failed: ${sendResult.errorResult?.toXDR("base64") ?? "unknown error"}`,
+        );
+      }
+
+      if (!sendResult.hash || sendResult.hash.length === 0) {
+        throw new Error("[BufferService] createVaultFromXdr missing transaction hash");
+      }
+
+      await this.waitForTransactionSuccess(sendResult.hash, 15, 2_000);
+
+      // Try to extract the new vault address from the factory's Soroban return value.
+      // create_defindex_vault returns Address — scValToNative gives the C... string.
+      let vaultAddress: string | null = null;
+      try {
+        const rpcResult = await this.server.getTransaction(sendResult.hash);
+        if (
+          rpcResult.status === rpc.Api.GetTransactionStatus.SUCCESS &&
+          rpcResult.returnValue
+        ) {
+          const native = scValToNative(rpcResult.returnValue);
+          if (typeof native === "string" && native.length > 0) {
+            vaultAddress = native;
+            console.info(`[BufferService] createVaultFromXdr resolved vault address from tx return value: ${vaultAddress}`);
+          }
+        }
+      } catch (err: unknown) {
+        console.warn(`[BufferService] createVaultFromXdr could not parse return value: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      return { hash: sendResult.hash, vaultAddress };
+    });
+  }
+
+  private async waitForTransactionSuccess(
+    transactionHash: string,
+    maxAttempts = 12,
+    delayMs = 2_000,
+  ): Promise<void> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const tx = await this.server.getTransaction(transactionHash);
+      if (tx.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+        return;
+      }
+      if (tx.status === rpc.Api.GetTransactionStatus.FAILED) {
+        throw new Error(
+          `[BufferService] Transaction failed on-chain: ${transactionHash}`,
+        );
+      }
+      if (attempt < maxAttempts) {
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+
+    throw new Error(
+      `[BufferService] Transaction not confirmed after ${maxAttempts} attempts: ${transactionHash}`,
+    );
   }
 }

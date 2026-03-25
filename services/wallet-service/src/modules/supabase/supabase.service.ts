@@ -43,6 +43,7 @@ export interface UserBalanceData {
 export interface UserBufferConfig {
   stellarAddress: string | null;
   bufferContractAddress: string | null;
+  defindexVaultAddress: string | null;
   onboardingStatus: string | null;
 }
 
@@ -103,7 +104,7 @@ export class SupabaseService {
   async getUserBufferConfig(userId: string): Promise<UserBufferConfig> {
     const { data, error } = await this.client
       .from("profiles")
-      .select("stellar_address, buffer_contract_address, buffer_onboarding_status")
+      .select("stellar_address, buffer_contract_address, defindex_vault_address, buffer_onboarding_status")
       .eq("id", userId)
       .single();
 
@@ -119,6 +120,10 @@ export class SupabaseService {
       bufferContractAddress:
         typeof data.buffer_contract_address === "string" && data.buffer_contract_address.length > 0
           ? data.buffer_contract_address
+          : null,
+      defindexVaultAddress:
+        typeof data.defindex_vault_address === "string" && data.defindex_vault_address.length > 0
+          ? data.defindex_vault_address
           : null,
       onboardingStatus:
         typeof data.buffer_onboarding_status === "string" && data.buffer_onboarding_status.length > 0
@@ -274,6 +279,64 @@ export class SupabaseService {
           ? result.data.confirmed_at
           : null,
     };
+  }
+
+  /**
+   * Update a buffer_transactions row's status and optionally overwrite its metadata.
+   * Used by the vault creation background job to mark rows CONFIRMED or FAILED.
+   * The metadata field is completely replaced if provided (not merged).
+   */
+  async updateBufferTransactionStatus(
+    txId: string,
+    status: "PENDING" | "CONFIRMED" | "FAILED",
+    metadata?: Record<string, unknown>,
+  ): Promise<void> {
+    const updatePayload: Record<string, unknown> = { status };
+    if (metadata !== undefined) {
+      updatePayload.metadata = metadata;
+    }
+
+    const { error } = await this.client
+      .from("buffer_transactions")
+      .update(updatePayload)
+      .eq("id", txId);
+
+    if (error) {
+      throw new Error(`[SupabaseService] updateBufferTransactionStatus failed for tx ${txId}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Startup recovery: find all users stuck in VAULT_CREATING whose updated_at
+   * is older than the given threshold (default 5 minutes) and mark them FAILED.
+   *
+   * This handles the case where wallet-service restarted while a background
+   * vault-creation job was running. Without this, those users would be stuck
+   * in VAULT_CREATING forever with no way to retry via the UI.
+   *
+   * Called once at service startup (fire-and-forget in index.ts).
+   */
+  async failStuckVaultCreations(thresholdMinutes = 5): Promise<void> {
+    const threshold = new Date(Date.now() - thresholdMinutes * 60 * 1_000).toISOString();
+
+    const { data, error } = await this.client
+      .from("profiles")
+      .update({
+        buffer_onboarding_status: "FAILED",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("buffer_onboarding_status", "VAULT_CREATING")
+      .lt("updated_at", threshold)
+      .select("id");
+
+    if (error) {
+      throw new Error(`[SupabaseService] failStuckVaultCreations failed: ${error.message}`);
+    }
+
+    const recovered = data?.length ?? 0;
+    if (recovered > 0) {
+      console.warn(`[SupabaseService] Recovered ${recovered} user(s) stuck in VAULT_CREATING → FAILED`);
+    }
   }
 
   async syncUserBalance(userId: string, balanceData: UserBalanceData): Promise<void> {

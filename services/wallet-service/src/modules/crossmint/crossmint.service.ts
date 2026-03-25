@@ -14,6 +14,19 @@ export interface SignTransactionResponse {
   transactionHash: string;
 }
 
+export interface CreateUserTransactionRequest {
+  walletAddress: string;
+  signerEmail: string;
+  transactionXDR?: string;
+  contractId?: string;
+  method?: string;
+  args?: Record<string, unknown>;
+}
+
+export interface CreateUserTransactionResponse {
+  transactionId: string;
+}
+
 export class CrossmintService {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
@@ -25,7 +38,8 @@ export class CrossmintService {
       throw new Error("[CrossmintService] Required env var: CROSSMINT_API_KEY");
     }
 
-    this.baseUrl = "https://staging.crossmint.com";
+    this.baseUrl = process.env.CROSSMINT_BASE_URL ?? "https://staging.crossmint.com";
+    console.info(`[CrossmintService] Using base URL: ${this.baseUrl}`);
     this.headers = {
       "X-API-KEY": apiKey,
       "Content-Type": "application/json",
@@ -96,42 +110,109 @@ export class CrossmintService {
     return data;
   }
 
-  async signAndSubmitTransaction(
-    request: SignTransactionRequest,
-  ): Promise<SignTransactionResponse> {
-    const response = await fetch(
-      `${this.baseUrl}/api/2025-06-09/wallets/${request.walletLocator}/transactions`,
-      {
+  async createUserTransaction(
+    request: CreateUserTransactionRequest,
+  ): Promise<CreateUserTransactionResponse> {
+    const walletLocator = encodeURIComponent(request.walletAddress);
+    const endpoint = `${this.baseUrl}/api/2025-06-09/wallets/${walletLocator}/transactions`;
+    const signer = `email:${request.signerEmail}`;
+
+    const createTx = async (
+      transaction:
+        | string
+        | { type: "serialized-transaction"; serializedTransaction: string; contractId?: string }
+        | { type: "contract-call"; contractId: string; method: string; args: Record<string, unknown> },
+    ): Promise<Record<string, unknown>> => {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: this.headers,
         body: JSON.stringify({
           params: {
-            transaction: {
-              type: "stellar-xdr",
-              xdr: request.transactionXDR,
-            },
-            signer: "api-key",
+            transaction,
+            signer,
           },
         }),
-      },
-    );
+      });
 
-    const data = (await response.json()) as Record<string, unknown>;
+      const data = (await response.json()) as Record<string, unknown>;
+      if (!response.ok) {
+        const message =
+          typeof data.message === "string" && data.message.length > 0
+            ? data.message
+            : JSON.stringify(data);
+        throw new Error(message);
+      }
 
-    if (!response.ok) {
+      return data;
+    };
+
+    let data: Record<string, unknown>;
+    if (request.contractId && request.method && request.args) {
+      data = await createTx({
+        type: "contract-call",
+        contractId: request.contractId,
+        method: request.method,
+        args: request.args,
+      });
+      console.info("[CrossmintService] createUserTransaction succeeded payload=contract-call");
+    } else if (request.transactionXDR) {
+      if (typeof request.transactionXDR !== "string") {
+        throw new Error(
+          `[CrossmintService] createUserTransaction expected transactionXDR string, received ${typeof request.transactionXDR}`,
+        );
+      }
+      const tx = request.transactionXDR.trim();
+      if (tx.length === 0) {
+        throw new Error("[CrossmintService] createUserTransaction received empty transactionXDR");
+      }
+
+      const serializedTransactionPayload: {
+        type: "serialized-transaction";
+        serializedTransaction: string;
+        contractId?: string;
+      } = {
+        type: "serialized-transaction",
+        serializedTransaction: tx,
+      };
+      if (request.contractId) {
+        serializedTransactionPayload.contractId = request.contractId;
+      }
+
+      try {
+        data = await createTx(serializedTransactionPayload);
+        console.info("[CrossmintService] createUserTransaction succeeded payload=serialized-transaction");
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        const expectsString =
+          message.includes("Expected string, received object") ||
+          message.includes("params.transaction: Expected string");
+
+        if (!expectsString) {
+          throw error;
+        }
+
+        data = await createTx(tx);
+        console.info("[CrossmintService] createUserTransaction succeeded payload=serialized-string-fallback");
+      }
+    } else {
       throw new Error(
-        `[CrossmintService] signAndSubmitTransaction failed: ${JSON.stringify(data)}`,
+        "[CrossmintService] createUserTransaction requires either contract-call params or transactionXDR.",
       );
     }
 
-    console.info(
-      `[CrossmintService] Transaction submitted for ${request.walletLocator}: ${(data.onChain as Record<string, unknown>)?.txId}`,
-    );
+    const transactionId = typeof data.id === "string" ? data.id : null;
+    if (!transactionId) {
+      throw new Error("[CrossmintService] createUserTransaction succeeded without transaction id");
+    }
 
-    return {
-      signedXDR: request.transactionXDR,
-      transactionHash:
-        ((data.onChain as Record<string, unknown>)?.txId as string) ?? (data.id as string),
-    };
+    return { transactionId };
+  }
+
+  async signAndSubmitTransaction(
+    _request: SignTransactionRequest,
+  ): Promise<SignTransactionResponse> {
+    throw new Error(
+      "[CrossmintService] USER_SIGNATURE_REQUIRED: Server-side signing is disabled for user fund operations.",
+    );
   }
 }

@@ -2,17 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth, useWallet } from "@crossmint/client-sdk-react-ui";
+import { StellarWallet, useAuth, useWallet } from "@crossmint/client-sdk-react-ui";
 import {
   onboardUser,
   getBufferBalance,
-  prepareVaultCreation,
-  submitVaultCreation,
+  getBufferWalletState,
+  createVault,
+  getOnboardingStatus,
   prepareBufferDeposit,
   confirmBufferDeposit,
   prepareBufferWithdraw,
   confirmBufferWithdraw,
 } from "@redi/api-client";
+import { ApiError } from "@redi/api-client";
 import type { OnboardingResponse, BufferBalanceResponse } from "@redi/api-client";
 
 const STROOPS_PER_XLM = BigInt("10000000");
@@ -63,11 +65,10 @@ type WalletWithApi = {
       walletLocator: string,
       body: {
         params: {
-          transaction: {
-            type: "serialized-transaction";
-            serializedTransaction: string;
-            contractId?: string;
-          };
+          transaction:
+            | string
+            | { type: "serialized-transaction"; serializedTransaction: string; contractId?: string }
+            | { type: "contract-call"; contractId: string; method: string; args: Record<string, unknown> };
           signer?: string;
         };
       },
@@ -94,7 +95,7 @@ function sanitizeSensitive(input: string): string {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { user, logout, status: authStatus } = useAuth();
+  const { user, logout, status: authStatus, jwt } = useAuth();
   const { wallet, getOrCreateWallet } = useWallet();
 
   const [onboarding, setOnboarding] = useState<OnboardingResponse | null>(null);
@@ -108,12 +109,14 @@ export default function DashboardPage() {
   const [depositAmount, setDepositAmount] = useState<string>("10");
   const [withdrawAmount, setWithdrawAmount] = useState<string>("1");
   const [flowMessage, setFlowMessage] = useState<string | null>(null);
+  const [xlmBalance, setXlmBalance] = useState<string | null>(null);
   const didBootstrap = useRef(false);
-  const didAutoActivateVault = useRef(false);
-
   const userId = user?.id ?? null;
   const email = user?.email ?? null;
   const walletAddress = onboarding?.stellarAddress ?? wallet?.address ?? null;
+  const isOnboardingReady = onboarding?.status === "READY";
+  const hasVaultAddress =
+    typeof onboarding?.vaultAddress === "string" && onboarding.vaultAddress.length > 0;
 
   const loadBalance = useCallback(async (targetUserId: string) => {
     setIsBalanceLoading(true);
@@ -132,6 +135,29 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const loadXlmBalance = useCallback(async () => {
+    if (!wallet && !email) return;
+    try {
+      if (wallet) {
+        const balances = await wallet.balances();
+        setXlmBalance(balances.nativeToken?.amount ?? null);
+      } else if (email) {
+        const state = await getBufferWalletState(email);
+        setXlmBalance(state.nativeToken?.amount ?? null);
+      }
+    } catch (err: unknown) {
+      console.warn(`[Dashboard] loadXlmBalance SDK failed: ${sanitizeSensitive(toErrorMessage(err))}`);
+      if (email) {
+        try {
+          const state = await getBufferWalletState(email);
+          setXlmBalance(state.nativeToken?.amount ?? null);
+        } catch (fallbackErr: unknown) {
+          console.warn(`[Dashboard] loadXlmBalance:fallback failed: ${sanitizeSensitive(toErrorMessage(fallbackErr))}`);
+        }
+      }
+    }
+  }, [wallet, email]);
+
   const refreshAll = useCallback(async () => {
     if (!userId || !email) return;
     const ob = await onboardUser(userId, email);
@@ -139,7 +165,8 @@ export default function DashboardPage() {
     if (ob.status === "READY") {
       await loadBalance(userId);
     }
-  }, [userId, email, loadBalance]);
+    await loadXlmBalance();
+  }, [userId, email, loadBalance, loadXlmBalance]);
 
   useEffect(() => {
     if (authStatus === "logged-out") {
@@ -190,27 +217,75 @@ export default function DashboardPage() {
         throw new Error("No pudimos confirmar la operación desde la cuenta.");
       }
 
-      if (typeof resolvedWallet.experimental_apiClient !== "function") {
-        throw new Error("No pudimos abrir el flujo de confirmación de operación.");
-      }
-
       const signerLocator =
         typeof resolvedWallet.signer?.locator === "function"
           ? resolvedWallet.signer.locator()
-          : undefined;
+          : `email:${email}`;
 
-      const apiClient = resolvedWallet.experimental_apiClient();
+      const crossmintApiKey = process.env.NEXT_PUBLIC_CROSSMINT_API_KEY;
+      const crossmintBaseUrl =
+        process.env.NEXT_PUBLIC_CROSSMINT_BASE_URL ?? "https://staging.crossmint.com";
+      if (!crossmintApiKey || crossmintApiKey.length === 0) {
+        throw new Error("Falta NEXT_PUBLIC_CROSSMINT_API_KEY para crear transacciones de firma.");
+      }
+      if (!jwt || jwt.length === 0) {
+        throw new Error("No hay JWT de sesión Crossmint. Reautentica y vuelve a intentar.");
+      }
 
-      const created = await apiClient.createTransaction("me:stellar:smart", {
-        params: {
-          transaction: {
-            type: "serialized-transaction",
-            serializedTransaction: transactionXDR,
-            contractId: bufferContractId,
+      const createTx = async (
+        transaction:
+          | string
+          | { type: "serialized-transaction"; serializedTransaction: string; contractId?: string },
+      ): Promise<{ id?: string; message?: unknown; error?: unknown }> => {
+        const response = await fetch(
+          `${crossmintBaseUrl}/api/2025-06-09/wallets/me:stellar:smart/transactions`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${jwt}`,
+              "X-API-KEY": crossmintApiKey,
+            },
+            body: JSON.stringify({
+              params: {
+                transaction,
+                signer: signerLocator,
+              },
+            }),
           },
-          ...(signerLocator ? { signer: signerLocator } : {}),
-        },
-      });
+        );
+
+        const body = (await response.json().catch(() => null)) as
+          | { id?: string; message?: unknown; error?: unknown }
+          | null;
+        if (!response.ok) {
+          const errMessage =
+            body && typeof body === "object" && "message" in body && body.message
+              ? toErrorMessage(body.message)
+              : `HTTP ${response.status}`;
+          throw new Error(sanitizeSensitive(errMessage));
+        }
+        return body ?? {};
+      };
+
+      let created: { id?: string; message?: unknown; error?: unknown };
+      try {
+        created = await createTx(transactionXDR);
+      } catch (error: unknown) {
+        const message = toErrorMessage(error);
+        const expectedObjectError =
+          message.includes("Expected object, received string") ||
+          message.includes("params.transaction: Expected object");
+        if (!expectedObjectError) {
+          throw new Error(`Crossmint createTransaction failed: ${sanitizeSensitive(message)}`);
+        }
+
+        created = await createTx({
+          type: "serialized-transaction",
+          serializedTransaction: transactionXDR,
+          contractId: bufferContractId,
+        });
+      }
 
       if (!created || typeof created !== "object") {
         throw new Error("Crossmint createTransaction returned an invalid response.");
@@ -238,6 +313,153 @@ export default function DashboardPage() {
 
       return approved.hash;
     },
+    [getOrCreateWallet, email, jwt],
+  );
+
+  const executeBufferTransaction = useCallback(
+    async (transactionXDR: string, bufferContractId: string): Promise<string> => {
+      if (!email) {
+        throw new Error("Cuenta no disponible. Vuelve a iniciar sesión.");
+      }
+
+      const resolvedWallet = await getOrCreateWallet({
+        chain: "stellar",
+        signer: { type: "email", email },
+      });
+
+      if (!resolvedWallet) {
+        throw new Error("No pudimos obtener la cuenta activa.");
+      }
+
+      let stellarWallet: StellarWallet;
+      try {
+        stellarWallet = StellarWallet.from(resolvedWallet);
+      } catch (error: unknown) {
+        throw new Error(`No es una wallet Stellar válida: ${toErrorMessage(error)}`);
+      }
+
+      try {
+        const result = await stellarWallet.sendTransaction({
+          transaction: transactionXDR,
+          contractId: bufferContractId,
+        });
+
+        if (!result.hash || result.hash.length === 0) {
+          throw new Error("No recibimos hash on-chain de la transacción.");
+        }
+
+        return result.hash;
+      } catch (error: unknown) {
+        const message = toErrorMessage(error);
+        const expectedStringError =
+          message.includes("Expected string, received object") ||
+          message.includes("params.transaction: Expected string");
+
+        if (!expectedStringError) {
+          throw new Error(`Crossmint sendTransaction failed: ${sanitizeSensitive(message)}`);
+        }
+
+        // Compatibility fallback for API validators that still expect params.transaction as string.
+        const crossmintApiKey = process.env.NEXT_PUBLIC_CROSSMINT_API_KEY;
+        const crossmintBaseUrl =
+          process.env.NEXT_PUBLIC_CROSSMINT_BASE_URL ?? "https://staging.crossmint.com";
+        if (!crossmintApiKey || crossmintApiKey.length === 0) {
+          throw new Error(
+            "Falta NEXT_PUBLIC_CROSSMINT_API_KEY para fallback string de Crossmint.",
+          );
+        }
+        if (!jwt || jwt.length === 0) {
+          throw new Error(
+            "No hay JWT de sesión Crossmint para fallback string. Reautentica y vuelve a intentar.",
+          );
+        }
+
+        const createdResponse = await fetch(
+          `${crossmintBaseUrl}/api/2025-06-09/wallets/me:stellar:smart/transactions`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${jwt}`,
+              "X-API-KEY": crossmintApiKey,
+            },
+            body: JSON.stringify({
+              params: {
+                transaction: transactionXDR,
+                signer: `email:${email}`,
+              },
+            }),
+          },
+        );
+
+        const created = (await createdResponse.json().catch(() => null)) as
+          | { id?: string; message?: unknown; error?: unknown }
+          | null;
+
+        if (!createdResponse.ok) {
+          const fallbackMessage =
+            created && typeof created === "object" && "message" in created && created.message
+              ? toErrorMessage(created.message)
+              : `HTTP ${createdResponse.status}`;
+          throw new Error(
+            `Crossmint createTransaction (fallback string) failed: ${sanitizeSensitive(
+              fallbackMessage,
+            )}`,
+          );
+        }
+
+        if (!created || typeof created !== "object") {
+          throw new Error("Crossmint createTransaction (fallback string) respondió inválido.");
+        }
+
+        if ("message" in created && created.message) {
+          throw new Error(
+            `Crossmint createTransaction (fallback string) failed: ${sanitizeSensitive(
+              toErrorMessage(created.message),
+            )}`,
+          );
+        }
+
+        const transactionId = typeof created.id === "string" ? created.id : null;
+        if (!transactionId) {
+          throw new Error(
+            "Crossmint createTransaction (fallback string) no devolvió transactionId.",
+          );
+        }
+
+        const walletWithApi = resolvedWallet as unknown as WalletWithApi;
+        const approved = await walletWithApi.approve({ transactionId });
+        if (!approved.hash || approved.hash.length === 0) {
+          throw new Error("No recibimos hash on-chain de la transacción.");
+        }
+
+        return approved.hash;
+      }
+    },
+    [getOrCreateWallet, email, jwt],
+  );
+
+  const approveBufferTransaction = useCallback(
+    async (transactionId: string): Promise<string> => {
+      if (!email) {
+        throw new Error("Cuenta no disponible. Vuelve a iniciar sesión.");
+      }
+
+      const resolvedWallet = (await getOrCreateWallet({
+        chain: "stellar",
+        signer: { type: "email", email },
+      })) as unknown as WalletWithApi | undefined;
+
+      if (!resolvedWallet || typeof resolvedWallet.approve !== "function") {
+        throw new Error("No pudimos obtener la cuenta para aprobar la transacción.");
+      }
+
+      const approved = await resolvedWallet.approve({ transactionId });
+      if (!approved.hash || approved.hash.length === 0) {
+        throw new Error("No recibimos hash on-chain de la transacción.");
+      }
+      return approved.hash;
+    },
     [getOrCreateWallet, email],
   );
 
@@ -253,30 +475,46 @@ export default function DashboardPage() {
 
     setIsVaultLoading(true);
     try {
-      const preparedVault = await prepareVaultCreation(userId);
-      const vaultTransactionHash = await executeUserSignedTransaction(preparedVault.transactionXDR);
-      await submitVaultCreation(userId, preparedVault.txId, vaultTransactionHash);
-      await refreshAll();
-      setFlowMessage("Plan activado. Ya puedes operar tus aportes.");
-      return true;
+      try {
+        await createVault(userId);
+      } catch (err: unknown) {
+        // If the vault is already active (stale local state), treat as success.
+        if (err instanceof ApiError && err.errorCode === "ALREADY_READY") {
+          await refreshAll();
+          return true;
+        }
+        throw err;
+      }
+
+      setFlowMessage("Activando tu plan de ahorro…");
+
+      // Poll until backend background job finishes (READY or FAILED).
+      // Max ~60s at 3s intervals (20 attempts).
+      for (let i = 0; i < 20; i++) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 3_000));
+        const s = await getOnboardingStatus(userId);
+        if (s.status === "READY") {
+          await refreshAll();
+          setFlowMessage("Plan activado. Ya puedes operar tus aportes.");
+          return true;
+        }
+        if (s.status === "FAILED") {
+          throw new Error("La activación del plan falló. Por favor, intenta nuevamente.");
+        }
+      }
+
+      throw new Error("Tiempo de espera agotado activando tu plan. Por favor, intenta nuevamente.");
     } catch (err: unknown) {
       const message = sanitizeSensitive(
         err instanceof Error ? err.message : "No pudimos activar tu plan.",
       );
       setAppError(message);
+      setFlowMessage(null);
       return false;
     } finally {
       setIsVaultLoading(false);
     }
-  }, [userId, onboarding, executeUserSignedTransaction, refreshAll]);
-
-  useEffect(() => {
-    if (!userId || !walletAddress || !onboarding) return;
-    if (didAutoActivateVault.current) return;
-    if (onboarding.status === "READY" && onboarding.vaultAddress) return;
-    didAutoActivateVault.current = true;
-    void ensureVaultReady();
-  }, [userId, walletAddress, onboarding, ensureVaultReady]);
+  }, [userId, onboarding, refreshAll]);
 
   const handleDeposit = useCallback(async () => {
     if (!userId) return;
@@ -286,18 +524,20 @@ export default function DashboardPage() {
     try {
       const vaultReady = await ensureVaultReady();
       if (!vaultReady) {
-        setFlowMessage("No se pudo activar tu plan. Reintenta para continuar.");
         return;
       }
 
       const amountStroops = xlmToStroops(depositAmount);
       const prepared = await prepareBufferDeposit(userId, amountStroops);
-      const transactionHash = await executeUserSignedTransaction(
-        prepared.transactionXDR,
-        prepared.bufferContractId,
-      );
+
+      if (!prepared.transactionXDR || !prepared.bufferContractId) {
+        throw new Error("Transaction XDR or bufferContractId not returned by server.");
+      }
+      const transactionHash = prepared.crossmintTransactionId
+        ? await approveBufferTransaction(prepared.crossmintTransactionId)
+        : await executeBufferTransaction(prepared.transactionXDR, prepared.bufferContractId);
       await confirmBufferDeposit(userId, prepared.txId, transactionHash);
-      await loadBalance(userId);
+      await Promise.all([loadBalance(userId), loadXlmBalance()]);
       setFlowMessage("Aporte confirmado y balance actualizado.");
     } catch (err: unknown) {
       const message = sanitizeSensitive(
@@ -307,7 +547,15 @@ export default function DashboardPage() {
     } finally {
       setIsDepositLoading(false);
     }
-  }, [userId, depositAmount, ensureVaultReady, executeUserSignedTransaction, loadBalance]);
+  }, [
+    userId,
+    depositAmount,
+    ensureVaultReady,
+    approveBufferTransaction,
+    executeBufferTransaction,
+    loadBalance,
+    loadXlmBalance,
+  ]);
 
   const handleWithdraw = useCallback(async () => {
     if (!userId) return;
@@ -317,12 +565,15 @@ export default function DashboardPage() {
     try {
       const sharesAmount = xlmToStroops(withdrawAmount);
       const prepared = await prepareBufferWithdraw(userId, sharesAmount);
-      const transactionHash = await executeUserSignedTransaction(
-        prepared.transactionXDR,
-        prepared.bufferContractId,
-      );
+
+      if (!prepared.transactionXDR || !prepared.bufferContractId) {
+        throw new Error("Transaction XDR or bufferContractId not returned by server.");
+      }
+      const transactionHash = prepared.crossmintTransactionId
+        ? await approveBufferTransaction(prepared.crossmintTransactionId)
+        : await executeBufferTransaction(prepared.transactionXDR, prepared.bufferContractId);
       await confirmBufferWithdraw(userId, prepared.txId, transactionHash);
-      await loadBalance(userId);
+      await Promise.all([loadBalance(userId), loadXlmBalance()]);
       setFlowMessage("Rescate confirmado y balance actualizado.");
     } catch (err: unknown) {
       const message = sanitizeSensitive(
@@ -332,7 +583,14 @@ export default function DashboardPage() {
     } finally {
       setIsWithdrawLoading(false);
     }
-  }, [userId, withdrawAmount, executeUserSignedTransaction, loadBalance]);
+  }, [
+    userId,
+    withdrawAmount,
+    approveBufferTransaction,
+    executeBufferTransaction,
+    loadBalance,
+    loadXlmBalance,
+  ]);
 
   const handleSignOut = async () => {
     localStorage.removeItem("redi_user");
@@ -344,10 +602,6 @@ export default function DashboardPage() {
     if (!balance) return "0";
     return (parseToBigInt(balance.availableShares) + parseToBigInt(balance.protectedShares)).toString();
   }, [balance]);
-
-  const isOnboardingReady = onboarding?.status === "READY";
-  const hasVaultAddress =
-    typeof onboarding?.vaultAddress === "string" && onboarding.vaultAddress.length > 0;
 
   return (
     <main className="min-h-svh bg-[#ffb48f] px-4 py-6 text-[#0D0D0D] md:py-10">
@@ -371,6 +625,20 @@ export default function DashboardPage() {
               </button>
             </div>
           </header>
+
+          <section className="mt-4 rounded-2xl bg-[#FFFFFF] p-3">
+            <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#0D0D0D]">
+              Saldo Wallet XLM
+            </p>
+            <p className="mt-2 text-lg font-black text-[#0D0D0D]">
+              {xlmBalance !== null
+                ? `${Number(xlmBalance).toLocaleString("es-AR", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 7,
+                  })} XLM`
+                : "—"}
+            </p>
+          </section>
 
           <section className="mt-4 grid grid-cols-2 gap-3">
             <article className="rounded-2xl bg-[#17e9e0] p-3">
@@ -400,11 +668,6 @@ export default function DashboardPage() {
             <p className="mt-2 text-sm font-semibold text-[#0D0D0D]">
               {balance ? formatDate(balance.lastDepositTs) : "Sin registros"}
             </p>
-            {!isOnboardingReady ? (
-              <p className="mt-2 text-xs font-semibold text-[#a64ac9]">
-                Estamos activando tu plan para habilitar operaciones.
-              </p>
-            ) : null}
           </section>
 
           <section className="mt-4 rounded-3xl bg-[#17e9e0] p-4">
@@ -425,11 +688,7 @@ export default function DashboardPage() {
               onClick={() => void handleDeposit()}
               className="mt-3 inline-flex h-12 w-full items-center justify-center rounded-xl bg-[#0D0D0D] text-sm font-black uppercase tracking-[0.09em] text-[#FFFFFF] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isDepositLoading
-                ? isVaultLoading
-                  ? "Activando plan y procesando"
-                  : "Procesando aporte"
-                : "Confirmar aporte"}
+              {isVaultLoading ? "Creando vault..." : isDepositLoading ? "Procesando aporte" : "Confirmar aporte"}
             </button>
           </section>
 
@@ -447,7 +706,7 @@ export default function DashboardPage() {
             />
             <button
               type="button"
-              disabled={!isOnboardingReady || !hasVaultAddress || isWithdrawLoading}
+              disabled={!walletAddress || isWithdrawLoading}
               onClick={() => void handleWithdraw()}
               className="mt-3 inline-flex h-12 w-full items-center justify-center rounded-xl bg-[#fccd04] text-sm font-black uppercase tracking-[0.09em] text-[#0D0D0D] disabled:cursor-not-allowed disabled:opacity-50"
             >

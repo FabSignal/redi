@@ -105,10 +105,78 @@ export class DeFindexService {
       `[DeFindexService] Vault creation initiated for ${request.userAddress}`,
     );
 
-    return {
-      transactionXDR: data.xdr as string,
-      predictedVaultAddress: data.predictedVaultAddress as string | undefined,
-    };
+    const transactionXDR = this.extractTransactionXdr(data);
+    const predictedVaultAddress = this.extractPredictedVaultAddress(data);
+
+    return { transactionXDR, predictedVaultAddress };
+  }
+
+  private extractPredictedVaultAddress(payload: Record<string, unknown>): string | undefined {
+    const candidates = [
+      payload.predictedVaultAddress,
+      payload.vaultAddress,
+      payload.vault_address,
+      payload.address,
+      payload.contractAddress,
+      payload.contract_address,
+    ];
+    for (const candidate of candidates) {
+      const asString = this.asNonEmptyString(candidate);
+      if (asString) return asString;
+    }
+    // Not a failure — we'll fall back to parsing the tx return value on-chain.
+    console.warn(
+      `[DeFindexService] predictedVaultAddress absent from response. Keys present: ${JSON.stringify(Object.keys(payload))}`,
+    );
+    return undefined;
+  }
+
+  private extractTransactionXdr(payload: Record<string, unknown>): string {
+    const direct = this.asNonEmptyString(payload.xdr);
+    if (direct) return direct;
+
+    const topLevelAlternatives = [
+      payload.transactionXDR,
+      payload.transaction,
+      payload.tx,
+    ];
+    for (const candidate of topLevelAlternatives) {
+      const asString = this.asNonEmptyString(candidate);
+      if (asString) return asString;
+    }
+
+    if (payload.xdr && typeof payload.xdr === "object") {
+      const nested = payload.xdr as Record<string, unknown>;
+      const nestedAlternatives = [
+        nested.tx,
+        nested.transactionXDR,
+        nested.transaction,
+        nested.xdr,
+      ];
+      for (const candidate of nestedAlternatives) {
+        const asString = this.asNonEmptyString(candidate);
+        if (asString) {
+          const nestedMethod =
+            typeof nested.method === "string" ? ` method=${nested.method}` : "";
+          console.info(
+            `[DeFindexService] Extracted nested vault tx payload as serialized XDR.${nestedMethod}`,
+          );
+          return asString;
+        }
+      }
+    }
+
+    throw new Error(
+      `[DeFindexService] createVaultForUser invalid xdr payload shape: ${JSON.stringify(
+        Object.keys(payload),
+      )}`,
+    );
+  }
+
+  private asNonEmptyString(value: unknown): string | null {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
   }
 
   async waitForVaultConfirmation(

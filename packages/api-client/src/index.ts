@@ -64,6 +64,9 @@ const preparedTransactionSchema = z.object({
   transactionXDR: z.string().min(1),
   walletAddress: z.string().min(1),
   bufferContractId: z.string().min(1).optional(),
+  crossmintTransactionId: z.string().uuid().optional(),
+  method: z.string().min(1).optional(),
+  args: z.record(z.string(), z.unknown()).optional(),
 });
 
 const confirmedTransactionSchema = z.object({
@@ -72,18 +75,16 @@ const confirmedTransactionSchema = z.object({
   status: z.literal("CONFIRMED"),
 });
 
-const preparedVaultSchema = z.object({
+const createdVaultSchema = z.object({
   txId: z.string().uuid(),
-  transactionXDR: z.string().min(1),
-  walletAddress: z.string().min(1),
-  predictedVaultAddress: z.string().nullable(),
+  status: z.literal("PROCESSING"),
 });
 
-const submittedVaultSchema = z.object({
-  txId: z.string().uuid(),
-  transactionHash: z.string().min(1),
-  vaultAddress: z.string().min(1),
-  status: z.literal("READY"),
+const onboardingStatusSchema = z.object({
+  userId: z.string(),
+  status: z.string(),
+  stellarAddress: z.string().nullish(),
+  vaultAddress: z.string().nullish(),
 });
 
 export type WalletResponse = z.infer<typeof walletSchema>;
@@ -92,8 +93,19 @@ export type OnboardingResponse = z.infer<typeof onboardingSchema>;
 export type BufferBalanceResponse = z.infer<typeof bufferBalanceSchema>;
 export type PreparedTransactionResponse = z.infer<typeof preparedTransactionSchema>;
 export type ConfirmedTransactionResponse = z.infer<typeof confirmedTransactionSchema>;
-export type PreparedVaultResponse = z.infer<typeof preparedVaultSchema>;
-export type SubmittedVaultResponse = z.infer<typeof submittedVaultSchema>;
+export type CreatedVaultResponse = z.infer<typeof createdVaultSchema>;
+export type OnboardingStatusResponse = z.infer<typeof onboardingStatusSchema>;
+
+export class ApiError extends Error {
+  readonly errorCode: string;
+  readonly statusCode: number;
+  constructor(message: string, errorCode: string, statusCode: number) {
+    super(message);
+    this.name = "ApiError";
+    this.errorCode = errorCode;
+    this.statusCode = statusCode;
+  }
+}
 
 function getBaseUrl() {
   return process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4103";
@@ -121,13 +133,25 @@ async function postJson<T>(path: string, payload: unknown, schema: z.ZodSchema<T
 
   if (!response.ok) {
     let parsedMessage: string | null = null;
+    let parsedCode: string | null = null;
     try {
       const body = (await response.json()) as unknown;
       parsedMessage = parseApiErrorPayload(body);
+      if (
+        body &&
+        typeof body === "object" &&
+        "errorCode" in body &&
+        typeof (body as Record<string, unknown>).errorCode === "string"
+      ) {
+        parsedCode = (body as { errorCode: string }).errorCode;
+      }
     } catch {
-      parsedMessage = null;
     }
-    throw new Error(parsedMessage ?? `API request failed (${response.status})`);
+    throw new ApiError(
+      parsedMessage ?? `API request failed (${response.status})`,
+      parsedCode ?? "API_ERROR",
+      response.status,
+    );
   }
 
   const data = (await response.json()) as unknown;
@@ -150,16 +174,12 @@ export function getBufferBalance(userId: string) {
   return postJson("/api/buffer/balance", { userId }, bufferBalanceSchema);
 }
 
-export function prepareVaultCreation(userId: string) {
-  return postJson("/api/buffer/onboarding/vault/prepare", { userId }, preparedVaultSchema);
+export function createVault(userId: string) {
+  return postJson("/api/buffer/onboarding/vault/create", { userId }, createdVaultSchema);
 }
 
-export function submitVaultCreation(userId: string, txId: string, transactionHash: string) {
-  return postJson(
-    "/api/buffer/onboarding/vault/submit",
-    { userId, txId, transactionHash },
-    submittedVaultSchema,
-  );
+export function getOnboardingStatus(userId: string) {
+  return postJson("/api/buffer/onboarding/status", { userId }, onboardingStatusSchema);
 }
 
 export function prepareBufferDeposit(userId: string, amountStroops: string) {

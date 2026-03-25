@@ -2,6 +2,7 @@ import { type Request, type Response } from "express";
 import { z } from "zod";
 import { BufferService } from "./buffer.service.js";
 import { SupabaseService } from "../supabase/supabase.service.js";
+import { CrossmintService } from "../crossmint/crossmint.service.js";
 
 const getBalanceSchema = z.object({
   userId: z.string().uuid(),
@@ -40,6 +41,7 @@ export class BufferController {
   constructor(
     private readonly bufferService: BufferService,
     private readonly supabaseService: SupabaseService,
+    private readonly crossmintService: CrossmintService,
   ) {}
 
   private sendError(
@@ -54,10 +56,11 @@ export class BufferController {
   }
 
   private resolveBufferContractId(userBufferContractAddress: string | null): string | null {
-    if (userBufferContractAddress) {
-      return userBufferContractAddress;
+    const configuredContractId = process.env.BUFFER_CONTRACT_ID ?? null;
+    if (configuredContractId) {
+      return configuredContractId;
     }
-    return process.env.BUFFER_CONTRACT_ID ?? null;
+    return userBufferContractAddress;
   }
 
   async getBalance(req: Request, res: Response): Promise<void> {
@@ -71,6 +74,16 @@ export class BufferController {
           409,
           "ONBOARDING_INCOMPLETE",
           "User has no stellar address. Complete onboarding first.",
+        );
+        return;
+      }
+
+      if (!user.defindexVaultAddress || user.onboardingStatus !== "READY") {
+        this.sendError(
+          res,
+          409,
+          "VAULT_NOT_READY",
+          "User vault not ready. Complete first vault signature before depositing.",
         );
         return;
       }
@@ -102,6 +115,7 @@ export class BufferController {
   async prepareDeposit(req: Request, res: Response): Promise<void> {
     try {
       const { userId, amountStroops } = depositSchema.parse(req.body);
+      console.info(`[BufferController] prepareDeposit start: userId=${userId} amount=${amountStroops}`);
       const user = await this.supabaseService.getUserBufferConfig(userId);
 
       if (!user.stellarAddress) {
@@ -110,6 +124,16 @@ export class BufferController {
           409,
           "ONBOARDING_INCOMPLETE",
           "User has no stellar address. Complete onboarding first.",
+        );
+        return;
+      }
+
+      if (!user.defindexVaultAddress || user.onboardingStatus !== "READY") {
+        this.sendError(
+          res,
+          409,
+          "VAULT_NOT_READY",
+          "User vault not ready. Complete first vault signature before depositing.",
         );
         return;
       }
@@ -139,11 +163,37 @@ export class BufferController {
         metadata: { bufferContractId, walletAddress: user.stellarAddress },
       });
 
+      const profile = await this.supabaseService.getUser(userId);
+      const signerEmail =
+        typeof profile.email === "string" && profile.email.length > 0 ? profile.email : null;
+      if (!signerEmail) {
+        this.sendError(
+          res,
+          409,
+          "MISSING_SIGNER_EMAIL",
+          "User email is required to create Crossmint transaction.",
+        );
+        return;
+      }
+
+      const crossmintTransaction = await this.crossmintService.createUserTransaction({
+        walletAddress: user.stellarAddress,
+        signerEmail,
+        transactionXDR,
+        contractId: bufferContractId,
+        method: "deposit",
+        args: { user: user.stellarAddress, amount: amountStroops },
+      });
+
+      console.info(`[BufferController] prepareDeposit success: userId=${userId} txId=${txId}`);
       res.json({
         txId,
         transactionXDR,
         walletAddress: user.stellarAddress,
         bufferContractId,
+        crossmintTransactionId: crossmintTransaction.transactionId,
+        method: "deposit",
+        args: { user: user.stellarAddress, amount: amountStroops },
       });
     } catch (error: unknown) {
       if (error instanceof z.ZodError) {
@@ -174,7 +224,20 @@ export class BufferController {
         return;
       }
       const { userId, txId, transactionHash } = parsed.data;
+      console.info(`[BufferController] submitDeposit start: userId=${userId} txId=${txId}`);
+
+      try {
+        const existing = await this.supabaseService.getBufferTransactionForUser(userId, txId);
+        if (existing.status === "CONFIRMED") {
+          console.info(`[BufferController] submitDeposit idempotent hit: txId=${txId}`);
+          res.json({ txId, transactionHash: existing.stellarTxHash ?? transactionHash, status: "CONFIRMED" });
+          return;
+        }
+      } catch {
+      }
+
       await this.supabaseService.confirmBufferTransactionForUser(userId, txId, transactionHash);
+      console.info(`[BufferController] submitDeposit success: txId=${txId} hash=${transactionHash}`);
       res.json({ txId, transactionHash, status: "CONFIRMED" });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -186,6 +249,7 @@ export class BufferController {
   async prepareWithdraw(req: Request, res: Response): Promise<void> {
     try {
       const { userId, sharesAmount } = withdrawSchema.parse(req.body);
+      console.info(`[BufferController] prepareWithdraw start: userId=${userId} shares=${sharesAmount}`);
       const user = await this.supabaseService.getUserBufferConfig(userId);
 
       if (!user.stellarAddress) {
@@ -194,6 +258,16 @@ export class BufferController {
           409,
           "ONBOARDING_INCOMPLETE",
           "User has no stellar address. Complete onboarding first.",
+        );
+        return;
+      }
+
+      if (!user.defindexVaultAddress || user.onboardingStatus !== "READY") {
+        this.sendError(
+          res,
+          409,
+          "VAULT_NOT_READY",
+          "User vault not ready. Complete first vault signature before withdrawing.",
         );
         return;
       }
@@ -223,11 +297,37 @@ export class BufferController {
         metadata: { bufferContractId, walletAddress: user.stellarAddress },
       });
 
+      const profile = await this.supabaseService.getUser(userId);
+      const signerEmail =
+        typeof profile.email === "string" && profile.email.length > 0 ? profile.email : null;
+      if (!signerEmail) {
+        this.sendError(
+          res,
+          409,
+          "MISSING_SIGNER_EMAIL",
+          "User email is required to create Crossmint transaction.",
+        );
+        return;
+      }
+
+      const crossmintTransaction = await this.crossmintService.createUserTransaction({
+        walletAddress: user.stellarAddress,
+        signerEmail,
+        transactionXDR,
+        contractId: bufferContractId,
+        method: "withdraw_available",
+        args: { user: user.stellarAddress, shares: sharesAmount, to: user.stellarAddress },
+      });
+
+      console.info(`[BufferController] prepareWithdraw success: userId=${userId} txId=${txId}`);
       res.json({
         txId,
         transactionXDR,
         walletAddress: user.stellarAddress,
         bufferContractId,
+        crossmintTransactionId: crossmintTransaction.transactionId,
+        method: "withdraw_available",
+        args: { user: user.stellarAddress, shares: sharesAmount, to: user.stellarAddress },
       });
     } catch (error: unknown) {
       if (error instanceof z.ZodError) {
@@ -258,7 +358,20 @@ export class BufferController {
         return;
       }
       const { userId, txId, transactionHash } = parsed.data;
+      console.info(`[BufferController] submitWithdraw start: userId=${userId} txId=${txId}`);
+
+      try {
+        const existing = await this.supabaseService.getBufferTransactionForUser(userId, txId);
+        if (existing.status === "CONFIRMED") {
+          console.info(`[BufferController] submitWithdraw idempotent hit: txId=${txId}`);
+          res.json({ txId, transactionHash: existing.stellarTxHash ?? transactionHash, status: "CONFIRMED" });
+          return;
+        }
+      } catch {
+      }
+
       await this.supabaseService.confirmBufferTransactionForUser(userId, txId, transactionHash);
+      console.info(`[BufferController] submitWithdraw success: txId=${txId} hash=${transactionHash}`);
       res.json({ txId, transactionHash, status: "CONFIRMED" });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";

@@ -1,43 +1,39 @@
-# Node / Turbo
+# dependencies
 node_modules
 .pnpm-store
+
+# turbo
 .turbo
 
-# Build outputs
+# build outputs
 .next
 dist
 build
 coverage
 
-# Env / secrets
+# env files (can opt-in for committing if needed)
 .env
 .env.*
 !.env.example
 !.env.*.example
 
-# Logs
+# logs
 *.log
 logs
 
-# OS / editor
+# misc
 .DS_Store
 .vscode
 .idea
 
-# Rust / Soroban (NUEVO)
+# claude
+.claude/
+
+# soroban
 target/
 Cargo.lock
 **/*.rs.bk
 *.wasm
 *.so
-
-# Soroban generated files (NUEVO)
 .soroban/
 .soroban-example/
-
-# Python (si usas scripts) (NUEVO)
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/

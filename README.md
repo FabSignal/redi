@@ -1,6 +1,10 @@
+![alt text](docs/assets/banner-redi.png)
+
 # Redi
 
-## Doc for developers
+Redi is a DeFi-powered B2B2C protocol on Stellar/Soroban that enables collateralized installment purchases using user-owned savings. Deposits flow into a Buffer contract integrated with DeFindex vaults for automated yield generation via Blend Protocol. On purchase, the Bridge contract locks a portion of the Buffer as on-chain collateral at a maximum LTV of 80%, mints an installment plan, and draws liquidity from the Redi Pool to settle merchant payment upfront. The Redi Pool is funded by external liquidity providers who earn yield from a share of installment interest while capital is deployed. Collateral remains yield-bearing while locked. On missed payment, the contract auto-liquidates from protected collateral. No external credit scoring. No undercollateralized exposure.
+
+## For developers
 
 Production-oriented monorepo with a modular, scalable architecture. It contains multiple Next.js applications, backend services, Soroban smart contracts, and shared packages used across the ecosystem.
 

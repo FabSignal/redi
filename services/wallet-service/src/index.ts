@@ -31,15 +31,37 @@ const supabaseService = new SupabaseService();
 const crossmintService = new CrossmintService();
 const defindexService = new DeFindexService();
 const bufferService = new BufferService();
-const onboardingService = new OnboardingService(supabaseService, crossmintService, defindexService);
-const bufferController = new BufferController(bufferService, supabaseService);
+const onboardingService = new OnboardingService(
+  supabaseService,
+  crossmintService,
+  defindexService,
+  bufferService,
+);
+const bufferController = new BufferController(bufferService, supabaseService, crossmintService);
 const onboardingController = new OnboardingController(onboardingService, supabaseService);
 
 const env = getServerEnv();
 const app = express();
 
+const allowedOrigins = new Set(
+  (process.env.CORS_ALLOWED_ORIGINS ?? "http://localhost:3000,http://localhost:3001,http://localhost:3002")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean),
+);
+
 app.use(helmet());
-app.use(cors({ origin: "http://localhost:3000", credentials: false }));
+app.use(
+  cors({
+    credentials: false,
+    origin(origin, callback) {
+      // No Origin header → server-to-server or curl → allow
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.has(origin)) return callback(null, true);
+      callback(new Error(`CORS: origin not allowed: ${origin}`));
+    },
+  }),
+);
 app.use(express.json({ limit: "1mb" }));
 app.use(
   pinoHttp({
@@ -65,6 +87,13 @@ app.get("/health", (_req, res) => {
 
 app.use("/api/buffer", createBufferWalletRouter(bufferController, onboardingController, crossmintService));
 app.use("/api/buffer", stellarWalletRoutes);
+
+// Startup recovery: if wallet-service restarted while a vault creation background
+// job was running, those users are stuck in VAULT_CREATING with no job to finish them.
+// Mark them FAILED so they can retry via /vault/create.
+void supabaseService.failStuckVaultCreations().catch((err: unknown) => {
+  console.error("[startup] failStuckVaultCreations failed:", err);
+});
 
 app.listen(env.WALLET_SERVICE_PORT, () => {
   process.stdout.write(`wallet-service listening on http://localhost:${env.WALLET_SERVICE_PORT}\n`);

@@ -56,7 +56,11 @@ export function LoginPage() {
                 REDI
               </p>
               <h1 className="mt-4 text-3xl font-black leading-none text-[#0D0D0D]">Inicializando</h1>
-              <p className="mt-3 text-sm font-semibold text-[#a64ac9]">Estamos preparando tu dashboard.</p>
+              {error ? (
+                <p className="mt-3 text-sm font-semibold text-red-600">{error}</p>
+              ) : (
+                <p className="mt-3 text-sm font-semibold text-[#a64ac9]">Estamos preparando tu dashboard.</p>
+              )}
               <button
                 type="button"
                 onClick={() => void handleSignOut()}

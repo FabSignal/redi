@@ -13,7 +13,6 @@ use vault_import::Client as DeFindexVaultClient;
 const MIN_AMOUNT: i128 = 1;
 const DEFAULT_SLIPPAGE_BPS: i128 = 50;
 const DEFAULT_MIN_INTERVAL_SECS: u64 = 2;
-const BPS_DIVISOR: i128 = 10000;
 
 #[contracttype]
 #[derive(Clone)]
@@ -63,6 +62,7 @@ pub struct ContractConfig {
 pub enum DataKey {
     Admin,
     Vault,
+    UserVault(Address),
     Asset,
     Bridge,
     Paused,
@@ -130,6 +130,23 @@ impl BufferContract {
         env.events().publish((Symbol::new(&env, "bridge_set"),), bridge);
     }
 
+    pub fn set_user_vault(env: Env, user: Address, vault: Address) {
+        let admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Admin not set"));
+        admin.require_auth();
+
+        Self::validate_non_zero_address(&env, &user);
+        Self::validate_non_zero_address(&env, &vault);
+
+        env.storage().persistent().set(&DataKey::UserVault(user.clone()), &vault);
+        env.events().publish((Symbol::new(&env, "user_vault_set"), user), vault);
+    }
+
+    pub fn get_user_vault(env: Env, user: Address) -> Address {
+        Self::resolve_vault_for_user(&env, &user)
+    }
+
     pub fn update_config(env: Env, min_deposit_interval: u64, slippage_tolerance_bps: i128) {
         let admin: Address = env.storage().instance()
             .get(&DataKey::Admin)
@@ -175,9 +192,7 @@ impl BufferContract {
             panic!("Invalid amount");
         }
 
-        let vault: Address = env.storage().instance()
-            .get(&DataKey::Vault)
-            .unwrap_or_else(|| panic!("Vault not configured"));
+        let vault = Self::resolve_vault_for_user(&env, &user);
 
         let config: ContractConfig = env.storage().instance()
             .get(&DataKey::Config)
@@ -201,22 +216,13 @@ impl BufferContract {
             }
         }
         
-        let (total_managed_before, total_shares) = Self::vault_totals(env.clone());
-        
-        let expected_shares = if total_shares == 0 || total_managed_before == 0 {
-            amount
-        } else {
-            mul_div_ceil(&env, amount, total_shares, total_managed_before)
-        };
-        
-        let slippage_amount = mul_div(&env, expected_shares, config.slippage_tolerance_bps, BPS_DIVISOR);
-        let min_shares_out = checked_sub(&env, expected_shares, slippage_amount);
-
+        // Keep nested invocation args deterministic for smart-wallet auth trees.
+        // Dynamic `amounts_min` based on live vault state can drift between simulation and inclusion.
+        // That drift invalidates nested `require_auth` checks in downstream contracts.
         let vault_client = DeFindexVaultClient::new(&env, &vault);
-
         let result = vault_client.deposit(
             &vec![&env, amount],
-            &vec![&env, min_shares_out],
+            &vec![&env, 0i128],
             &user,
             &true
         );
@@ -241,10 +247,6 @@ impl BufferContract {
 
         if actual_shares <= 0 {
             panic!("Invalid vault response");
-        }
-        
-        if actual_shares < min_shares_out {
-            panic!("Slippage exceeded");
         }
         
         let mut current_bal: BufferBalance = env.storage().persistent()
@@ -386,10 +388,10 @@ impl BufferContract {
     }
 
     pub fn get_values(env: Env, user: Address) -> (i128, i128, i128) {
-        let bal = Self::get_balance_or_default(env.clone(), user);
+        let bal = Self::get_balance_or_default(env.clone(), user.clone());
         let total_shares = checked_add(&env, bal.available_shares, bal.protected_shares);
         
-        let (total_managed, vault_total_shares) = Self::vault_totals(env.clone());
+        let (total_managed, vault_total_shares) = Self::vault_totals_for_user(env.clone(), user);
         
         let total_value = if total_shares == 0 || vault_total_shares == 0 {
             0
@@ -413,7 +415,7 @@ impl BufferContract {
             panic!("Invalid amount");
         }
         
-        let (total_managed, total_shares) = Self::vault_totals(env.clone());
+        let (total_managed, total_shares) = Self::vault_totals_default(env.clone());
         
         if total_shares == 0 || total_managed == 0 {
             amount
@@ -455,9 +457,7 @@ impl BufferContract {
             panic!("Invalid amount");
         }
 
-        let vault: Address = env.storage().instance()
-            .get(&DataKey::Vault)
-            .unwrap_or_else(|| panic!("Vault not configured"));
+        let vault = Self::resolve_vault_for_user(&env, &user);
 
         let mut bal = Self::get_balance_or_default(env.clone(), user.clone());
 
@@ -531,10 +531,36 @@ impl BufferContract {
         }
     }
 
-    fn vault_totals(env: Env) -> (i128, i128) {
+    fn resolve_vault_for_user(env: &Env, user: &Address) -> Address {
+        if let Some(user_vault) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::UserVault(user.clone()))
+        {
+            return user_vault;
+        }
+        panic!("User vault not configured");
+    }
+
+    fn vault_totals_default(env: Env) -> (i128, i128) {
         let vault: Address = env.storage().instance()
             .get(&DataKey::Vault)
             .unwrap_or_else(|| panic!("Vault not configured"));
+        
+        let vault_client = DeFindexVaultClient::new(&env, &vault);
+        let total_shares = vault_client.total_supply();
+        let funds = vault_client.fetch_total_managed_funds();
+        
+        let mut total_managed = 0i128;
+        for f in funds.iter() {
+            total_managed = checked_add(&env, total_managed, f.total_amount);
+        }
+        
+        (total_managed, total_shares)
+    }
+
+    fn vault_totals_for_user(env: Env, user: Address) -> (i128, i128) {
+        let vault = Self::resolve_vault_for_user(&env, &user);
         
         let vault_client = DeFindexVaultClient::new(&env, &vault);
         let total_shares = vault_client.total_supply();
