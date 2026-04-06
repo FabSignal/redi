@@ -1,3 +1,7 @@
+import { Injectable } from "@nestjs/common";
+import { RuntimeConfigService } from "../../common/config/runtime-config.service.js";
+import { structuredLog } from "../../utils/structured-log.js";
+
 export interface CreateVaultRequest {
   userAddress: string;
   assetAddress?: string;
@@ -8,8 +12,6 @@ export interface CreateVaultResponse {
   transactionXDR: string;
   predictedVaultAddress?: string;
 }
-
-import { structuredLog } from "../../utils/structured-log.js";
 
 interface VaultRoles {
   manager: string | null;
@@ -60,18 +62,19 @@ interface VaultInfoSummary {
   apy: number | null;
 }
 
+@Injectable()
 export class DeFindexService {
   private readonly apiUrl: string;
   private readonly network: string;
   private readonly adminAddress: string;
   private readonly headers: Record<string, string>;
 
-  constructor() {
-    const apiUrl = process.env.DEFINDEX_API_URL;
-    const apiKey = process.env.DEFINDEX_API_KEY;
-    const adminAddress = process.env.ADMIN_STELLAR_ADDRESS;
+  constructor(private readonly runtimeConfig: RuntimeConfigService) {
+    const apiUrl = this.runtimeConfig.defindexApiUrl;
+    const apiKey = this.runtimeConfig.defindexApiKey;
+    const adminAddress = this.runtimeConfig.adminStellarAddress;
 
-    this.network = process.env.STELLAR_NETWORK ?? "testnet";
+    this.network = this.runtimeConfig.stellarNetwork;
 
     if (!apiUrl || !apiKey || !adminAddress) {
       throw new Error(
@@ -88,8 +91,8 @@ export class DeFindexService {
   }
 
   async createVaultForUser(request: CreateVaultRequest): Promise<CreateVaultResponse> {
-    const assetAddress = request.assetAddress ?? process.env.XLM_CONTRACT_ADDRESS;
-    const strategyAddress = request.strategyAddress ?? process.env.XLM_BLEND_STRATEGY;
+    const assetAddress = request.assetAddress ?? this.runtimeConfig.xlmContractAddress;
+    const strategyAddress = request.strategyAddress ?? this.runtimeConfig.xlmBlendStrategy;
 
     if (!assetAddress || !strategyAddress) {
       throw new Error(
@@ -98,7 +101,7 @@ export class DeFindexService {
     }
 
     const strategyName =
-      assetAddress === process.env.XLM_CONTRACT_ADDRESS
+      assetAddress === this.runtimeConfig.xlmContractAddress
         ? "XLM_blend_strategy"
         : "USDC_blend_strategy";
 
@@ -132,15 +135,12 @@ export class DeFindexService {
 
     let response: Response;
     try {
-      response = await fetch(
-        `${this.apiUrl}/factory/create-vault?network=${this.network}`,
-        {
-          method: "POST",
-          headers: this.headers,
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(60_000),
-        },
-      );
+      response = await fetch(`${this.apiUrl}/factory/create-vault?network=${this.network}`, {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(60_000),
+      });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";
       throw new Error(`[DeFindexService] createVaultForUser network error: ${message}`);
@@ -152,9 +152,7 @@ export class DeFindexService {
       throw new Error(`[DeFindexService] createVaultForUser failed: ${JSON.stringify(data)}`);
     }
 
-    console.info(
-      `[DeFindexService] Vault creation initiated for ${request.userAddress}`,
-    );
+    console.info(`[DeFindexService] Vault creation initiated for ${request.userAddress}`);
 
     const transactionXDR = this.extractTransactionXdr(data);
     const predictedVaultAddress = this.extractPredictedVaultAddress(data);
@@ -186,11 +184,7 @@ export class DeFindexService {
     const direct = this.asNonEmptyString(payload.xdr);
     if (direct) return direct;
 
-    const topLevelAlternatives = [
-      payload.transactionXDR,
-      payload.transaction,
-      payload.tx,
-    ];
+    const topLevelAlternatives = [payload.transactionXDR, payload.transaction, payload.tx];
     for (const candidate of topLevelAlternatives) {
       const asString = this.asNonEmptyString(candidate);
       if (asString) return asString;
@@ -198,17 +192,11 @@ export class DeFindexService {
 
     if (payload.xdr && typeof payload.xdr === "object") {
       const nested = payload.xdr as Record<string, unknown>;
-      const nestedAlternatives = [
-        nested.tx,
-        nested.transactionXDR,
-        nested.transaction,
-        nested.xdr,
-      ];
+      const nestedAlternatives = [nested.tx, nested.transactionXDR, nested.transaction, nested.xdr];
       for (const candidate of nestedAlternatives) {
         const asString = this.asNonEmptyString(candidate);
         if (asString) {
-          const nestedMethod =
-            typeof nested.method === "string" ? ` method=${nested.method}` : "";
+          const nestedMethod = typeof nested.method === "string" ? ` method=${nested.method}` : "";
           console.info(
             `[DeFindexService] Extracted nested vault tx payload as serialized XDR.${nestedMethod}`,
           );
@@ -246,7 +234,9 @@ export class DeFindexService {
   private summarizeVaultInfo(payload: Record<string, unknown>): VaultInfoSummary {
     const rolesRecord = this.asRecord(payload.roles);
     const assets = Array.isArray(payload.assets) ? payload.assets : [];
-    const totalManagedFunds = Array.isArray(payload.totalManagedFunds) ? payload.totalManagedFunds : [];
+    const totalManagedFunds = Array.isArray(payload.totalManagedFunds)
+      ? payload.totalManagedFunds
+      : [];
     const feesRecord = this.asRecord(payload.feesBps);
 
     return {
@@ -304,10 +294,10 @@ export class DeFindexService {
   }
 
   private async fetchVaultInfo(vaultAddress: string): Promise<Record<string, unknown>> {
-    const response = await fetch(
-      `${this.apiUrl}/vault/${vaultAddress}?network=${this.network}`,
-      { headers: this.headers, signal: AbortSignal.timeout(15_000) },
-    );
+    const response = await fetch(`${this.apiUrl}/vault/${vaultAddress}?network=${this.network}`, {
+      headers: this.headers,
+      signal: AbortSignal.timeout(15_000),
+    });
 
     const data = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (!response.ok || !data) {

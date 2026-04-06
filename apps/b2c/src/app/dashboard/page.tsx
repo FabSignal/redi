@@ -128,7 +128,6 @@ export default function DashboardPage() {
       const message = sanitizeSensitive(
         err instanceof Error ? err.message : "No pudimos cargar tu balance.",
       );
-      setBalance(null);
       setBalanceError(message);
     } finally {
       setIsBalanceLoading(false);

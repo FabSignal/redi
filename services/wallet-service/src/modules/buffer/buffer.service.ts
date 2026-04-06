@@ -1,4 +1,6 @@
+import { Injectable } from "@nestjs/common";
 import {
+  Account,
   Address,
   Contract,
   Keypair,
@@ -6,10 +8,12 @@ import {
   Transaction,
   TransactionBuilder,
   BASE_FEE,
+  Horizon,
   scValToNative,
   nativeToScVal,
   rpc,
 } from "@stellar/stellar-sdk";
+import { RuntimeConfigService } from "../../common/config/runtime-config.service.js";
 import { adminMutex } from "../../utils/admin-mutex.js";
 
 export interface BufferBalance {
@@ -23,23 +27,27 @@ export interface BufferBalance {
   version: number;
 }
 
+@Injectable()
 export class BufferService {
   private readonly server: rpc.Server;
+  private readonly horizonServer: Horizon.Server;
   private readonly networkPassphrase: string;
   private readonly adminKeypair: Keypair;
 
-  constructor() {
-    const rpcUrl = process.env.STELLAR_SOROBAN_RPC_URL;
-    const adminSecret = process.env.ADMIN_STELLAR_SECRET;
-    const network = process.env.STELLAR_NETWORK ?? "testnet";
+  constructor(private readonly runtimeConfig: RuntimeConfigService) {
+    const rpcUrl = this.runtimeConfig.stellarSorobanRpcUrl;
+    const adminSecret = this.runtimeConfig.adminStellarSecret;
+    const horizonUrl = this.runtimeConfig.stellarHorizonUrl;
+    const network = this.runtimeConfig.stellarNetwork;
 
-    if (!rpcUrl || !adminSecret) {
+    if (!rpcUrl || !adminSecret || !horizonUrl) {
       throw new Error(
-        "[BufferService] Required env vars: STELLAR_SOROBAN_RPC_URL, ADMIN_STELLAR_SECRET",
+        "[BufferService] Required env vars: STELLAR_SOROBAN_RPC_URL, STELLAR_HORIZON_URL, ADMIN_STELLAR_SECRET",
       );
     }
 
     this.server = new rpc.Server(rpcUrl);
+    this.horizonServer = new Horizon.Server(horizonUrl);
     this.networkPassphrase = network === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
     this.adminKeypair = Keypair.fromSecret(adminSecret);
   }
@@ -50,7 +58,7 @@ export class BufferService {
     }
 
     const contract = new Contract(bufferContractId);
-    const account = await this.server.getAccount(this.adminKeypair.publicKey());
+    const account = await this.getSourceAccount(this.adminKeypair.publicKey());
 
     const transaction = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -92,7 +100,11 @@ export class BufferService {
       throw new Error("[BufferService] getValues: no result from simulation");
     }
 
-    const valuesNative = scValToNative(valuesResult) as [bigint | number | string, bigint | number | string, bigint | number | string];
+    const valuesNative = scValToNative(valuesResult) as [
+      bigint | number | string,
+      bigint | number | string,
+      bigint | number | string,
+    ];
 
     return {
       availableShares: native.available_shares.toString(),
@@ -117,7 +129,7 @@ export class BufferService {
 
     const contract = new Contract(bufferContractId);
     const source = userAddress.startsWith("C") ? this.adminKeypair.publicKey() : userAddress;
-    const account = await this.server.getAccount(source);
+    const account = await this.getSourceAccount(source);
 
     const transaction = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -148,7 +160,7 @@ export class BufferService {
 
     const contract = new Contract(bufferContractId);
     const source = userAddress.startsWith("C") ? this.adminKeypair.publicKey() : userAddress;
-    const account = await this.server.getAccount(source);
+    const account = await this.getSourceAccount(source);
 
     const transaction = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -182,7 +194,7 @@ export class BufferService {
     }
 
     const contract = new Contract(bufferContractId);
-    const account = await this.server.getAccount(this.adminKeypair.publicKey());
+    const account = await this.getSourceAccount(this.adminKeypair.publicKey());
 
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -255,18 +267,19 @@ export class BufferService {
       let vaultAddress: string | null = null;
       try {
         const rpcResult = await this.server.getTransaction(sendResult.hash);
-        if (
-          rpcResult.status === rpc.Api.GetTransactionStatus.SUCCESS &&
-          rpcResult.returnValue
-        ) {
+        if (rpcResult.status === rpc.Api.GetTransactionStatus.SUCCESS && rpcResult.returnValue) {
           const native = scValToNative(rpcResult.returnValue);
           if (typeof native === "string" && native.length > 0) {
             vaultAddress = native;
-            console.info(`[BufferService] createVaultFromXdr resolved vault address from tx return value: ${vaultAddress}`);
+            console.info(
+              `[BufferService] createVaultFromXdr resolved vault address from tx return value: ${vaultAddress}`,
+            );
           }
         }
       } catch (err: unknown) {
-        console.warn(`[BufferService] createVaultFromXdr could not parse return value: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(
+          `[BufferService] createVaultFromXdr could not parse return value: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
 
       return { hash: sendResult.hash, vaultAddress };
@@ -284,9 +297,7 @@ export class BufferService {
         return;
       }
       if (tx.status === rpc.Api.GetTransactionStatus.FAILED) {
-        throw new Error(
-          `[BufferService] Transaction failed on-chain: ${transactionHash}`,
-        );
+        throw new Error(`[BufferService] Transaction failed on-chain: ${transactionHash}`);
       }
       if (attempt < maxAttempts) {
         await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
@@ -296,5 +307,24 @@ export class BufferService {
     throw new Error(
       `[BufferService] Transaction not confirmed after ${maxAttempts} attempts: ${transactionHash}`,
     );
+  }
+
+  private async getSourceAccount(accountId: string): Promise<Account> {
+    try {
+      return await this.server.getAccount(accountId);
+    } catch (error: unknown) {
+      const rpcMessage = error instanceof Error ? error.message : String(error);
+
+      try {
+        const horizonAccount = await this.horizonServer.loadAccount(accountId);
+        return new Account(horizonAccount.accountId(), horizonAccount.sequence);
+      } catch (horizonError: unknown) {
+        const horizonMessage =
+          horizonError instanceof Error ? horizonError.message : String(horizonError);
+        throw new Error(
+          `[BufferService] Unable to load source account ${accountId}. rpc=${rpcMessage}; horizon=${horizonMessage}`,
+        );
+      }
+    }
   }
 }

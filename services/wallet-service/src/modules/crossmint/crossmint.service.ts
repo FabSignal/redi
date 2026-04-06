@@ -1,3 +1,6 @@
+import { Injectable } from "@nestjs/common";
+import { RuntimeConfigService } from "../../common/config/runtime-config.service.js";
+
 export interface CreateWalletResponse {
   walletId: string;
   address: string;
@@ -27,18 +30,15 @@ export interface CreateUserTransactionResponse {
   transactionId: string;
 }
 
+@Injectable()
 export class CrossmintService {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
 
-  constructor() {
-    const apiKey = process.env.CROSSMINT_API_KEY;
+  constructor(private readonly runtimeConfig: RuntimeConfigService) {
+    const apiKey = this.runtimeConfig.crossmintApiKey;
 
-    if (!apiKey) {
-      throw new Error("[CrossmintService] Required env var: CROSSMINT_API_KEY");
-    }
-
-    this.baseUrl = process.env.CROSSMINT_BASE_URL ?? "https://staging.crossmint.com";
+    this.baseUrl = this.runtimeConfig.crossmintBaseUrl;
     console.info(`[CrossmintService] Using base URL: ${this.baseUrl}`);
     this.headers = {
       "X-API-KEY": apiKey,
@@ -46,8 +46,6 @@ export class CrossmintService {
     };
   }
 
-  // GET primero — soporta wallet existente con cualquier signer (email o api-key)
-  // Solo crea si no existe — idempotente
   async createWalletForUser(email: string): Promise<CreateWalletResponse> {
     const walletLocator = encodeURIComponent(`email:${email}:stellar`);
 
@@ -121,7 +119,12 @@ export class CrossmintService {
       transaction:
         | string
         | { type: "serialized-transaction"; serializedTransaction: string; contractId?: string }
-        | { type: "contract-call"; contractId: string; method: string; args: Record<string, unknown> },
+        | {
+            type: "contract-call";
+            contractId: string;
+            method: string;
+            args: Record<string, unknown>;
+          },
     ): Promise<Record<string, unknown>> => {
       const response = await fetch(endpoint, {
         method: "POST",
@@ -180,7 +183,9 @@ export class CrossmintService {
 
       try {
         data = await createTx(serializedTransactionPayload);
-        console.info("[CrossmintService] createUserTransaction succeeded payload=serialized-transaction");
+        console.info(
+          "[CrossmintService] createUserTransaction succeeded payload=serialized-transaction",
+        );
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         const expectsString =
@@ -192,7 +197,9 @@ export class CrossmintService {
         }
 
         data = await createTx(tx);
-        console.info("[CrossmintService] createUserTransaction succeeded payload=serialized-string-fallback");
+        console.info(
+          "[CrossmintService] createUserTransaction succeeded payload=serialized-string-fallback",
+        );
       }
     } else {
       throw new Error(

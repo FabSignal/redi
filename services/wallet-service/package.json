@@ -4,30 +4,43 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "dev": "concurrently -k -n BUILD,RUN \"pnpm run build:watch\" \"pnpm run serve:watch\"",
+    "build:watch": "tsc -w -p tsconfig.build.json",
+    "serve:watch": "wait-on dist/main.js && node --watch dist/main.js",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"Add lint\"",
-    "test": "echo \"Add tests\""
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
-    "@redi/config": "workspace:^",
+    "@nestjs/common": "^11.1.18",
+    "@nestjs/config": "^4.0.3",
+    "@nestjs/core": "^11.1.18",
+    "@nestjs/platform-express": "^11.1.18",
     "@stellar/stellar-sdk": "^14.5.0",
     "@supabase/supabase-js": "^2.95.3",
-    "axios": "^1.13.5",
-    "cors": "^2.8.6",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
     "pino-http": "^11.0.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.19",
+    "@nestjs/testing": "^11.1.18",
     "@types/express": "^5.0.6",
     "@types/node": "^20",
+    "@types/supertest": "^7.2.0",
+    "concurrently": "^9.2.1",
+    "supertest": "^7.2.2",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.2",
+    "wait-on": "^9.0.4"
   }
 }

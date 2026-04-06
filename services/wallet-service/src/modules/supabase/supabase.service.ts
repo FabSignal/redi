@@ -1,4 +1,6 @@
+import { Injectable } from "@nestjs/common";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { RuntimeConfigService } from "../../common/config/runtime-config.service.js";
 
 export interface BufferOnboardingData {
   stellar_address?: string;
@@ -47,12 +49,13 @@ export interface UserBufferConfig {
   onboardingStatus: string | null;
 }
 
+@Injectable()
 export class SupabaseService {
   private readonly client: SupabaseClient;
 
-  constructor() {
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  constructor(private readonly runtimeConfig: RuntimeConfigService) {
+    const supabaseUrl = this.runtimeConfig.supabaseUrl;
+    const supabaseKey = this.runtimeConfig.supabaseServiceRoleKey;
 
     if (!supabaseUrl || !supabaseKey) {
       throw new Error(
@@ -104,12 +107,16 @@ export class SupabaseService {
   async getUserBufferConfig(userId: string): Promise<UserBufferConfig> {
     const { data, error } = await this.client
       .from("profiles")
-      .select("stellar_address, buffer_contract_address, defindex_vault_address, buffer_onboarding_status")
+      .select(
+        "stellar_address, buffer_contract_address, defindex_vault_address, buffer_onboarding_status",
+      )
       .eq("id", userId)
       .single();
 
     if (error) {
-      throw new Error(`[SupabaseService] getUserBufferConfig failed for ${userId}: ${error.message}`);
+      throw new Error(
+        `[SupabaseService] getUserBufferConfig failed for ${userId}: ${error.message}`,
+      );
     }
 
     return {
@@ -126,7 +133,8 @@ export class SupabaseService {
           ? data.defindex_vault_address
           : null,
       onboardingStatus:
-        typeof data.buffer_onboarding_status === "string" && data.buffer_onboarding_status.length > 0
+        typeof data.buffer_onboarding_status === "string" &&
+        data.buffer_onboarding_status.length > 0
           ? data.buffer_onboarding_status
           : null,
     };
@@ -166,7 +174,11 @@ export class SupabaseService {
       metadata: transaction.metadata ?? null,
     };
 
-    const result = await this.client.from("buffer_transactions").insert(payload).select("id").single();
+    const result = await this.client
+      .from("buffer_transactions")
+      .insert(payload)
+      .select("id")
+      .single();
     if (result.error) {
       throw new Error(
         `[SupabaseService] createBufferTransaction failed for ${transaction.userId}: ${result.error.message}`,
@@ -302,7 +314,9 @@ export class SupabaseService {
       .eq("id", txId);
 
     if (error) {
-      throw new Error(`[SupabaseService] updateBufferTransactionStatus failed for tx ${txId}: ${error.message}`);
+      throw new Error(
+        `[SupabaseService] updateBufferTransactionStatus failed for tx ${txId}: ${error.message}`,
+      );
     }
   }
 
@@ -335,7 +349,9 @@ export class SupabaseService {
 
     const recovered = data?.length ?? 0;
     if (recovered > 0) {
-      console.warn(`[SupabaseService] Recovered ${recovered} user(s) stuck in VAULT_CREATING → FAILED`);
+      console.warn(
+        `[SupabaseService] Recovered ${recovered} user(s) stuck in VAULT_CREATING → FAILED`,
+      );
     }
   }
 
